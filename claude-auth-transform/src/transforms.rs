@@ -1,5 +1,5 @@
 use std::{collections::HashSet, env, sync::LazyLock};
-
+use tracing::{debug, trace};
 use crate::{
     ENV_VERSION, Error,
     bodies::{Message, MessageBody, MessageContent, SystemEntry},
@@ -15,6 +15,7 @@ const TOOL_PREFIX: &str = "mcp_";
 
 pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     let Ok(mut parsed): Result<MessageBody, _> = serde_json::from_slice(bytes) else {
+        debug!("Failed to parse body, skipping transformation");
         return Ok(bytes.to_vec());
     };
 
@@ -22,6 +23,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     let version = ENV_VERSION.as_deref().unwrap_or(CONFIG.cc_version);
     let entrypoint = ENV_ENTRYPOINT.as_deref().unwrap_or("cli");
     let billing_header = build_billing_header_value(&parsed.messages, version, entrypoint);
+    trace!(billing_header, "Computed billing header");
 
     // Remove any existing billing header entries
     parsed.system.retain(|e| {
@@ -55,6 +57,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
             .unwrap_or(false)
     });
     if !has_identity {
+        trace!("Identity prefix not found in system entries, injecting");
         parsed.system.insert(
             1,
             SystemEntry {
@@ -135,6 +138,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         }
     }
     if moved_texts.len() > 0 {
+        trace!(texts_moved = moved_texts.len(), "system entries moved to user messages");
         let first_user = parsed
             .messages
             .iter_mut()
@@ -171,6 +175,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     if let Some(override_) = override_
         && override_.disable_effort
     {
+        trace!(model = parsed.model, "Disabling effort for model");
         parsed.output_config.remove("effort");
         parsed.thinking.remove("effort");
     }

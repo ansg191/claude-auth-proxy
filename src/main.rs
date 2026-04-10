@@ -2,6 +2,7 @@ use http_body_util::BodyExt;
 use axum::{Json, Router, body::Body, extract::Request};
 use axum::response::Response;
 use http::HeaderValue;
+use tracing::{debug, trace};
 use claude_auth_transform::transform_request;
 
 #[tokio::main]
@@ -15,6 +16,7 @@ async fn main() {
 
 async fn messages_handler(req: Request) -> Response {
     let (mut parts, body) = req.into_parts();
+    debug!("Received request: {} {}", parts.method, parts.uri);
 
     let path_and_query = parts
         .uri
@@ -40,11 +42,7 @@ async fn messages_handler(req: Request) -> Response {
 
     let req = transform_request(req).unwrap();
 
-    let (parts, body) = req.into_parts();
-    dbg!(&parts);
-    dbg!(String::from_utf8_lossy(&body));
-    let req = http::Request::from_parts(parts, body);
-
+    debug!("Forwarding request: {} {}", req.method(), req.uri());
     let req = reqwest::Request::try_from(req).unwrap();
     let client = reqwest::Client::new();
 

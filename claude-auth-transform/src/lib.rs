@@ -9,6 +9,7 @@ use std::{env, sync::LazyLock};
 
 pub use error::Error;
 use http::{HeaderMap, HeaderValue};
+use tracing::{debug, trace};
 use uuid::Uuid;
 
 use crate::{betas::BETA_MANAGER, config::CONFIG};
@@ -38,15 +39,20 @@ where
 
     let body = transform_body(body.as_ref())?;
 
+    trace!(headers = ?parts.headers, "Transformed Headers");
+    trace!(body = %String::from_utf8_lossy(&body).as_ref(), "Transformed Body");
+
     Ok(http::Request::from_parts(parts, body))
 }
 
 fn build_request_headers(headers: &mut HeaderMap, access_token: &str, model_id: &str) {
     let model_betas = BETA_MANAGER.get_model_betas(model_id);
+    trace!(?model_betas, model_id, "Model betas");
     let incoming_beta = headers
         .get("anthropic-beta")
         .map(|v| v.to_str().unwrap_or(""))
         .unwrap_or("");
+    trace!(?incoming_beta, model_id, "Incoming betas");
     let merged_betas = model_betas
         .into_iter()
         .chain(
@@ -57,6 +63,7 @@ fn build_request_headers(headers: &mut HeaderMap, access_token: &str, model_id: 
         )
         .collect::<Vec<_>>();
 
+    debug!(?merged_betas, model_id, "Computed betas");
     let merged_betas =
         HeaderValue::from_str(&merged_betas.join(",")).expect("Betas should all be valid ascii");
 
