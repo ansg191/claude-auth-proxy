@@ -1,9 +1,8 @@
 use http_body_util::BodyExt;
-use axum::{Json, Router, body::Body, extract::Request};
+use axum::{Router, body::Body, extract::Request};
 use axum::response::Response;
-use http::HeaderValue;
-use tracing::{debug, trace};
-use claude_auth_transform::transform_request;
+use claude_auth_transform::{transform_request, transform_response};
+use tracing::debug;
 
 #[tokio::main]
 async fn main() {
@@ -48,15 +47,16 @@ async fn messages_handler(req: Request) -> Response {
 
     let res = client.execute(req).await.unwrap();
 
-    // Convert response to Axum Response
+    // Convert reqwest::Response → http::Response with a streaming body
     let status = res.status();
     let headers = res.headers().clone();
-    let body = res.bytes().await.unwrap();
-    let body = Body::from(body);
+    let stream = res.bytes_stream();
+    let stream_body = Body::from_stream(stream);
 
-    let mut response = Response::new(body);
+    let mut response = Response::new(stream_body);
     *response.status_mut() = status;
     *response.headers_mut() = headers;
 
-    response
+    // Wrap through ClaudeBody to strip tool prefixes from SSE events
+    transform_response(response).map(Body::new)
 }

@@ -2,6 +2,7 @@ mod betas;
 mod bodies;
 mod config;
 mod error;
+mod response;
 mod signing;
 mod transforms;
 
@@ -9,11 +10,11 @@ use std::{env, sync::LazyLock};
 
 pub use error::Error;
 use http::{HeaderMap, HeaderValue};
+pub use response::{ClaudeBody, transform_response};
 use tracing::{debug, trace};
 use uuid::Uuid;
 
-use crate::{betas::BETA_MANAGER, config::CONFIG};
-use crate::transforms::transform_body;
+use crate::{betas::BETA_MANAGER, config::CONFIG, transforms::transform_body};
 
 /// Stable per-process session ID, matching Claude Code's X-Claude-Code-Session-Id
 static SESSION_ID: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().to_string());
@@ -28,14 +29,10 @@ where
     let (mut parts, body) = request.into_parts();
 
     // TODO: Process Credentials
-    let access_token = env::var("ANTHROPIC_ACCESS_TOKEN")
-        .expect("ANTHROPIC_ACCESS_TOKEN must be set");
+    let access_token =
+        env::var("ANTHROPIC_ACCESS_TOKEN").expect("ANTHROPIC_ACCESS_TOKEN must be set");
 
-    build_request_headers(
-        &mut parts.headers,
-        &access_token,
-        "claude-opus-4-6"
-    );
+    build_request_headers(&mut parts.headers, &access_token, "claude-opus-4-6");
 
     let body = transform_body(body.as_ref())?;
 
