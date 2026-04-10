@@ -1,4 +1,8 @@
-use std::{env, sync::{Arc, LazyLock}, time::Duration};
+use std::{
+    env,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use axum::{
     Router,
