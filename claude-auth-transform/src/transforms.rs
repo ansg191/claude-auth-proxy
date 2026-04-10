@@ -181,6 +181,8 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     }
 
     // Prefix all tool names with a reserved prefix
+    // TODO: also prefix tool_choice.name when tool_choice.type == "tool",
+    //       otherwise the API rejects the request with "tool not found".
     parsed.tools.iter_mut().for_each(|tool| {
         if let Some(name) = tool.name.as_mut() {
             name.insert_str(0, TOOL_PREFIX);
