@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{env, sync::{Arc, LazyLock}, time::Duration};
 
 use axum::{
     Router,
@@ -12,6 +12,20 @@ use http_body_util::BodyExt;
 use reqwest::Client;
 use tracing::debug;
 
+static CONNECT_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
+    env::var("PROXY_CONNECT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(Duration::from_secs(10), Duration::from_secs)
+});
+
+static READ_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
+    env::var("PROXY_READ_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(Duration::from_secs(600), Duration::from_secs)
+});
+
 #[derive(Debug)]
 struct ServerState {
     auth: ClaudeCodeAuthProvider,
@@ -22,9 +36,19 @@ struct ServerState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    tracing::info!(
+        connect_timeout = ?*CONNECT_TIMEOUT,
+        read_timeout = ?*READ_TIMEOUT,
+        "Proxy timeout configuration"
+    );
+
     let state = Arc::new(ServerState {
         auth: ClaudeCodeAuthProvider::new(),
-        client: Client::new(),
+        client: Client::builder()
+            .connect_timeout(*CONNECT_TIMEOUT)
+            .read_timeout(*READ_TIMEOUT)
+            .build()
+            .expect("failed to build HTTP client"),
     });
 
     let app = Router::new()
