@@ -8,9 +8,7 @@ use claude_auth_transform::transform_request;
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let v1 = Router::new().route("/messages", axum::routing::post(messages_handler));
-
-    let app = Router::new().nest("/v1", v1);
+    let app = Router::new().route("/v1/{*rest}", axum::routing::any(messages_handler));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap()
 }
@@ -18,14 +16,16 @@ async fn main() {
 async fn messages_handler(req: Request) -> Response {
     let (mut parts, body) = req.into_parts();
 
-    // Change host header to api.anthropic.com
-    parts.headers.insert("host", HeaderValue::from_static("api.anthropic.com"));
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .cloned()
+        .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
 
-    // Change uri to https://api.anthropic.com/v1/messages
     parts.uri = http::uri::Builder::new()
         .scheme("https")
         .authority("api.anthropic.com")
-        .path_and_query("/v1/messages")
+        .path_and_query(path_and_query)
         .build()
         .unwrap();
 
