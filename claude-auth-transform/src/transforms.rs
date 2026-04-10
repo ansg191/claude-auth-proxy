@@ -26,7 +26,56 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         return Ok(bytes.to_vec());
     };
 
-    // --- Billing header: inject as system[0] (no cache_control) ---
+    inject_billing_header(&mut parsed);
+    ensure_identity_prefix(&mut parsed);
+    split_identity_entries(&mut parsed);
+    relocate_non_core_system_entries(&mut parsed);
+
+    // Strip effort for models that don't support it (e.g. haiku).
+    // OpenCode sends { output_config: { effort: "high" } } but haiku
+    // rejects the effort parameter with a 400 error.
+    let override_ = parsed
+        .model
+        .as_deref()
+        .and_then(|model| CONFIG.get_model_override(model));
+    if let Some(override_) = override_
+        && override_.disable_effort
+    {
+        trace!(model = parsed.model, "Disabling effort for model");
+        parsed.output_config.remove("effort");
+        parsed.thinking.remove("effort");
+    }
+
+    // Prefix all tool names with a reserved prefix
+    // TODO: also prefix tool_choice.name when tool_choice.type == "tool",
+    //       otherwise the API rejects the request with "tool not found".
+    parsed.tools.iter_mut().for_each(|tool| {
+        if let Some(name) = tool.name.as_mut() {
+            name.insert_str(0, TOOL_PREFIX);
+        }
+    });
+
+    parsed.messages.iter_mut().for_each(|message| {
+        if let Some(MessageContent::Blocks(blocks)) = message.content.as_mut() {
+            for block in blocks.iter_mut() {
+                if let Some(tp) = block.r#type.as_deref()
+                    && tp == "tool_use"
+                    && let Some(name) = block.extra.get_mut("name")
+                    && name.is_string()
+                {
+                    *name = format!("{}{}", TOOL_PREFIX, name.as_str().unwrap()).into();
+                }
+            }
+        }
+    });
+
+    repair_tool_pairs(&mut parsed.messages);
+
+    Ok(serde_json::to_vec(&parsed)?)
+}
+
+// --- Billing header: inject as system[0] (no cache_control) ---
+fn inject_billing_header(parsed: &mut MessageBody) {
     let version = ENV_VERSION.as_deref().unwrap_or(CONFIG.cc_version);
     let entrypoint = ENV_ENTRYPOINT.as_deref().unwrap_or("cli");
     let billing_header = build_billing_header_value(&parsed.messages, version, entrypoint);
@@ -49,12 +98,14 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
             extra: HashMap::default(),
         },
     );
+}
 
-    // --- Ensure identity prefix is present ---
-    // Upstream's opencode plugin adds this via experimental.chat.system.transform
-    // BEFORE transformBody runs. We're a standalone proxy with no such hook, so
-    // we inject it here. Anthropic's OAuth validation requires the exact string
-    // `You are Claude Code, Anthropic's official CLI for Claude.` in system[].
+// --- Ensure identity prefix is present ---
+// Upstream's opencode plugin adds this via experimental.chat.system.transform
+// BEFORE transformBody runs. We're a standalone proxy with no such hook, so
+// we inject it here. Anthropic's OAuth validation requires the exact string
+// `You are Claude Code, Anthropic's official CLI for Claude.` in system[].
+fn ensure_identity_prefix(parsed: &mut MessageBody) {
     let has_identity = parsed.system.iter().any(|entry| {
         entry
             .text
@@ -72,12 +123,14 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
             },
         );
     }
+}
 
-    // --- Split identity prefix into its own system entry ---
-    // OpenCode's system.transform hook prepends the identity string, but
-    // OpenCode then concatenates all system entries into a single text block.
-    // Anthropic's API requires the identity string as a separate entry for
-    // OAuth validation (see issue griffinmartin/opencode-claude-auth#98).
+// --- Split identity prefix into its own system entry ---
+// OpenCode's system.transform hook prepends the identity string, but
+// OpenCode then concatenates all system entries into a single text block.
+// Anthropic's API requires the identity string as a separate entry for
+// OAuth validation (see issue griffinmartin/opencode-claude-auth#98).
+fn split_identity_entries(parsed: &mut MessageBody) {
     let mut split_system = Vec::with_capacity(parsed.system.len() + 1);
     for entry in parsed.system.drain(..) {
         if let Some(r#type) = entry.r#type.as_deref()
@@ -117,16 +170,18 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         }
     }
     parsed.system = split_system;
+}
 
-    // --- Relocate non-core system entries to user messages ---
-    // Anthropic's API now validates the system prompt for OAuth-authenticated
-    // requests that use Claude Code billing.  Third-party system prompts
-    // (like OpenCode's) trigger a 400 "out of extra usage" rejection when
-    // they appear inside the system[] array alongside the identity prefix.
-    //
-    // Work-around: keep only the billing header and identity prefix in
-    // system[], and prepend all other system content to the first user
-    // message where it is functionally equivalent but avoids the check.
+// --- Relocate non-core system entries to user messages ---
+// Anthropic's API now validates the system prompt for OAuth-authenticated
+// requests that use Claude Code billing.  Third-party system prompts
+// (like OpenCode's) trigger a 400 "out of extra usage" rejection when
+// they appear inside the system[] array alongside the identity prefix.
+//
+// Work-around: keep only the billing header and identity prefix in
+// system[], and prepend all other system content to the first user
+// message where it is functionally equivalent but avoids the check.
+fn relocate_non_core_system_entries(parsed: &mut MessageBody) {
     let mut kept_system = Vec::with_capacity(2);
     let mut moved_texts = Vec::with_capacity(parsed.system.len());
 
@@ -171,48 +226,6 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
             }
         }
     }
-
-    // Strip effort for models that don't support it (e.g. haiku).
-    // OpenCode sends { output_config: { effort: "high" } } but haiku
-    // rejects the effort parameter with a 400 error.
-    let override_ = parsed
-        .model
-        .as_deref()
-        .and_then(|model| CONFIG.get_model_override(model));
-    if let Some(override_) = override_
-        && override_.disable_effort
-    {
-        trace!(model = parsed.model, "Disabling effort for model");
-        parsed.output_config.remove("effort");
-        parsed.thinking.remove("effort");
-    }
-
-    // Prefix all tool names with a reserved prefix
-    // TODO: also prefix tool_choice.name when tool_choice.type == "tool",
-    //       otherwise the API rejects the request with "tool not found".
-    parsed.tools.iter_mut().for_each(|tool| {
-        if let Some(name) = tool.name.as_mut() {
-            name.insert_str(0, TOOL_PREFIX);
-        }
-    });
-
-    parsed.messages.iter_mut().for_each(|message| {
-        if let Some(MessageContent::Blocks(blocks)) = message.content.as_mut() {
-            for block in blocks.iter_mut() {
-                if let Some(tp) = block.r#type.as_deref()
-                    && tp == "tool_use"
-                    && let Some(name) = block.extra.get_mut("name")
-                    && name.is_string()
-                {
-                    *name = format!("{}{}", TOOL_PREFIX, name.as_str().unwrap()).into();
-                }
-            }
-        }
-    });
-
-    repair_tool_pairs(&mut parsed.messages);
-
-    Ok(serde_json::to_vec(&parsed)?)
 }
 
 fn repair_tool_pairs(messages: &mut Vec<Message>) {
@@ -316,7 +329,7 @@ mod tests {
 
         let parsed = run_transform(input);
 
-        assert_eq!(parsed["system"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
         assert!(
             parsed["system"][0]["text"]
                 .as_str()
@@ -342,7 +355,7 @@ mod tests {
 
         let parsed = run_transform(input);
 
-        assert_eq!(parsed["system"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
         assert!(
             parsed["messages"][0]["content"]
                 .as_str()
@@ -360,7 +373,7 @@ mod tests {
 
         let parsed = run_transform(input);
 
-        assert_eq!(parsed["system"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
         assert!(parsed["messages"][0]["content"].as_str().unwrap().contains(
             "OpenCode docs: https://example.com/opencode/docs and path /var/opencode/bin"
         ));
