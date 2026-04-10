@@ -47,13 +47,17 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     }
 
     // Prefix all tool names with a reserved prefix
-    // TODO: also prefix tool_choice.name when tool_choice.type == "tool",
-    //       otherwise the API rejects the request with "tool not found".
     parsed.tools.iter_mut().for_each(|tool| {
         if let Some(name) = tool.name.as_mut() {
             name.insert_str(0, TOOL_PREFIX);
         }
     });
+
+    if let Some(tool_choice) = parsed.tool_choice.as_mut()
+        && let Some(name) = tool_choice.name.as_mut()
+    {
+        name.insert_str(0, TOOL_PREFIX);
+    }
 
     parsed.messages.iter_mut().for_each(|message| {
         if let Some(MessageContent::Blocks(blocks)) = message.content.as_mut() {
@@ -648,5 +652,106 @@ mod tests {
 
         assert!(parsed.get("output_config").is_none());
         assert!(parsed.get("thinking").is_none());
+    }
+
+    #[test]
+    fn transform_body_prefixes_tool_choice_name() {
+        let input = json!({
+            "tools": [{ "name": "get_weather", "description": "Get weather" }],
+            "tool_choice": { "type": "tool", "name": "get_weather" },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert_eq!(parsed["tool_choice"]["type"], "tool");
+        assert_eq!(parsed["tool_choice"]["name"], "mcp_get_weather");
+    }
+
+    #[test]
+    fn transform_body_preserves_tool_choice_type_any_without_name() {
+        let input = json!({
+            "tools": [{ "name": "search" }],
+            "tool_choice": { "type": "any" },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert_eq!(parsed["tool_choice"]["type"], "any");
+        assert!(
+            parsed["tool_choice"].get("name").is_none(),
+            "tool_choice should not gain a name field"
+        );
+    }
+
+    #[test]
+    fn transform_body_preserves_tool_choice_type_auto_without_name() {
+        let input = json!({
+            "tools": [{ "name": "search" }],
+            "tool_choice": { "type": "auto" },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert_eq!(parsed["tool_choice"]["type"], "auto");
+        assert!(
+            parsed["tool_choice"].get("name").is_none(),
+            "tool_choice should not gain a name field"
+        );
+    }
+
+    #[test]
+    fn transform_body_omits_tool_choice_when_absent() {
+        let input = json!({
+            "tools": [{ "name": "search" }],
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert!(
+            parsed.get("tool_choice").is_none(),
+            "tool_choice should remain absent when not provided"
+        );
+    }
+
+    #[test]
+    fn transform_body_prefixes_tool_choice_name_alongside_tools() {
+        let input = json!({
+            "tools": [
+                { "name": "search" },
+                { "name": "analyze" }
+            ],
+            "tool_choice": { "type": "tool", "name": "analyze" },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert_eq!(parsed["tools"][0]["name"], "mcp_search");
+        assert_eq!(parsed["tools"][1]["name"], "mcp_analyze");
+        assert_eq!(parsed["tool_choice"]["type"], "tool");
+        assert_eq!(parsed["tool_choice"]["name"], "mcp_analyze");
+    }
+
+    #[test]
+    fn transform_body_preserves_tool_choice_disable_parallel_tool_use() {
+        let input = json!({
+            "tools": [{ "name": "analyze" }],
+            "tool_choice": {
+                "type": "tool",
+                "name": "analyze",
+                "disable_parallel_tool_use": true
+            },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert_eq!(parsed["tool_choice"]["type"], "tool");
+        assert_eq!(parsed["tool_choice"]["name"], "mcp_analyze");
+        assert_eq!(parsed["tool_choice"]["disable_parallel_tool_use"], true);
     }
 }
