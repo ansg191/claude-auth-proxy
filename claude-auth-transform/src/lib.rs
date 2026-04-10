@@ -41,7 +41,14 @@ where
 {
     let (mut parts, body) = request.into_parts();
 
-    build_request_headers(&mut parts.headers, access_token, "claude-opus-4-6");
+    let model_id = serde_json::from_slice::<serde_json::Value>(body.as_ref())
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(String::from));
+    build_request_headers(
+        &mut parts.headers,
+        access_token,
+        model_id.as_deref().unwrap_or(""),
+    );
 
     let body = transform_body(body.as_ref())?;
 
