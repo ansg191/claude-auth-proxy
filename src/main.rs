@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
     extract::{Request, State},
-    response::Response,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use claude_auth_providers::{ClaudeAuthProvider, claude_code::ClaudeCodeAuthProvider};
 use claude_auth_transform::{transform_request, transform_response};
@@ -28,10 +29,27 @@ async fn main() {
     });
 
     let app = Router::new()
+        .route("/health", axum::routing::get(health_handler))
+        .route("/ready", axum::routing::get(ready_handler))
         .route("/v1/{*rest}", axum::routing::any(messages_handler))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn health_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status": "ok"}))
+}
+
+async fn ready_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    if state.auth.has_credentials() {
+        (StatusCode::OK, Json(serde_json::json!({"status": "ready"})))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "not_ready"})),
+        )
+    }
 }
 
 async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -> Response {
