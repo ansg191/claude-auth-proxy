@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-    ".",
+    ".", "claude-auth-providers",
     "claude-auth-transform"
 ]
 
@@ -12,6 +12,7 @@ edition = "2024"
 
 [dependencies]
 axum = "0.8.8"
+claude-auth-providers = { version = "0.1.0", path = "claude-auth-providers" }
 claude-auth-transform = { version = "0.1.0", path = "claude-auth-transform" }
 http = "1.4.0"
 http-body-util = "0.1.3"

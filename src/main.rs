@@ -1,19 +1,34 @@
-use http_body_util::BodyExt;
-use axum::{Router, body::Body, extract::Request};
-use axum::response::Response;
+use std::sync::Arc;
+
+use axum::{
+    Router,
+    body::Body,
+    extract::{Request, State},
+    response::Response,
+};
+use claude_auth_providers::claude_code::ClaudeCodeAuthProvider;
 use claude_auth_transform::{transform_request, transform_response};
+use http_body_util::BodyExt;
 use tracing::debug;
+use claude_auth_providers::ClaudeAuthProvider;
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let app = Router::new().route("/v1/{*rest}", axum::routing::any(messages_handler));
+    let auth = Arc::new(ClaudeCodeAuthProvider::new());
+
+    let app = Router::new()
+        .route("/v1/{*rest}", axum::routing::any(messages_handler))
+        .with_state(auth);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap()
 }
 
-async fn messages_handler(req: Request) -> Response {
+async fn messages_handler(
+    State(auth): State<Arc<ClaudeCodeAuthProvider>>,
+    req: Request,
+) -> Response {
     let (mut parts, body) = req.into_parts();
     debug!("Received request: {} {}", parts.method, parts.uri);
 
@@ -39,7 +54,9 @@ async fn messages_handler(req: Request) -> Response {
     let collected = body.collect().await.unwrap().to_bytes();
     let req = http::Request::from_parts(parts, collected);
 
-    let req = transform_request(req).unwrap();
+    let token = auth.get_access_token().await.unwrap();
+
+    let req = transform_request(req, &token).unwrap();
 
     debug!("Forwarding request: {} {}", req.method(), req.uri());
     let req = reqwest::Request::try_from(req).unwrap();

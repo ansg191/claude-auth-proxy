@@ -22,15 +22,14 @@ static SESSION_ID: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().to_string(
 static ENV_VERSION: LazyLock<Option<String>> =
     LazyLock::new(|| env::var("ANTHROPIC_CLI_VERSION").ok());
 
-pub fn transform_request<B>(request: http::Request<B>) -> Result<http::Request<Vec<u8>>, Error>
+pub fn transform_request<B>(
+    request: http::Request<B>,
+    access_token: &str,
+) -> Result<http::Request<Vec<u8>>, Error>
 where
     B: AsRef<[u8]>,
 {
     let (mut parts, body) = request.into_parts();
-
-    // TODO: Process Credentials
-    let access_token =
-        env::var("ANTHROPIC_ACCESS_TOKEN").expect("ANTHROPIC_ACCESS_TOKEN must be set");
 
     build_request_headers(&mut parts.headers, &access_token, "claude-opus-4-6");
 
