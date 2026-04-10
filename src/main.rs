@@ -17,7 +17,8 @@ use claude_auth_providers::{ClaudeAuthProvider, claude_code::ClaudeCodeAuthProvi
 use claude_auth_transform::{transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
-use tracing::debug;
+use tokio::signal;
+use tracing::{debug, info};
 
 use crate::config::ServerConfig;
 
@@ -70,7 +71,34 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind((cfg.host, cfg.port))
         .await
         .unwrap();
-    axum::serve(listener, app).await.unwrap();
+    info!("Listening on port 3000");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+    info!("Server shutdown complete");
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async { signal::ctrl_c().await.expect("Failed to listen for Ctrl+C") };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+
+    info!("Shutdown signal received, draining in-flight requests...");
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
