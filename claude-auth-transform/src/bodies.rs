@@ -1,6 +1,7 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageBody {
@@ -54,5 +55,5 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<MessageContent>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub extra: HashMap<String, Value>,   
+    pub extra: HashMap<String, Value>,
 }

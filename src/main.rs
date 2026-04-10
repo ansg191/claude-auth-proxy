@@ -6,11 +6,10 @@ use axum::{
     extract::{Request, State},
     response::Response,
 };
-use claude_auth_providers::claude_code::ClaudeCodeAuthProvider;
+use claude_auth_providers::{ClaudeAuthProvider, claude_code::ClaudeCodeAuthProvider};
 use claude_auth_transform::{transform_request, transform_response};
 use http_body_util::BodyExt;
 use tracing::debug;
-use claude_auth_providers::ClaudeAuthProvider;
 
 #[tokio::main]
 async fn main() {

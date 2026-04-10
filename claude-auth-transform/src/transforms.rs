@@ -1,5 +1,7 @@
 use std::{collections::HashSet, env, sync::LazyLock};
+
 use tracing::{debug, trace};
+
 use crate::{
     ENV_VERSION, Error,
     bodies::{Message, MessageBody, MessageContent, SystemEntry},
@@ -138,7 +140,10 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         }
     }
     if moved_texts.len() > 0 {
-        trace!(texts_moved = moved_texts.len(), "system entries moved to user messages");
+        trace!(
+            texts_moved = moved_texts.len(),
+            "system entries moved to user messages"
+        );
         let first_user = parsed
             .messages
             .iter_mut()
