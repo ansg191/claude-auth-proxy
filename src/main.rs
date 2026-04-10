@@ -1,3 +1,5 @@
+mod config;
+
 use std::{
     env,
     sync::{Arc, LazyLock},
@@ -16,6 +18,8 @@ use claude_auth_transform::{transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
 use tracing::debug;
+
+use crate::config::ServerConfig;
 
 static CONNECT_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
     env::var("PROXY_CONNECT_TIMEOUT_SECS")
@@ -41,6 +45,8 @@ struct ServerState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let cfg = ServerConfig::from_env().unwrap();
+
     tracing::info!(
         connect_timeout = ?*CONNECT_TIMEOUT,
         read_timeout = ?*READ_TIMEOUT,
@@ -61,7 +67,9 @@ async fn main() {
         .route("/ready", axum::routing::get(ready_handler))
         .route("/v1/{*rest}", axum::routing::any(messages_handler))
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind((cfg.host, cfg.port))
+        .await
+        .unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
