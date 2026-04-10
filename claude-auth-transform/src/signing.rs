@@ -15,14 +15,14 @@ pub fn build_billing_header_value(messages: &[Message], version: &str, entrypoin
 }
 
 /// Extract text from the first user message's first text block.
-/// Matches Claude Code's K19() function exactly: find the first message
+/// Matches Claude Code's `K19()` function exactly: find the first message
 /// with role "user", then return the text of its first text content block.
 fn extract_first_user_message_text(messages: &[Message]) -> &str {
     let user_msg = messages
         .iter()
         .find(|msg| msg.role == Some("user".to_string()));
 
-    let content = user_msg.map(|msg| msg.content.as_ref()).flatten();
+    let content = user_msg.and_then(|msg| msg.content.as_ref());
     match content {
         Some(MessageContent::Text(text)) => text,
         Some(MessageContent::Blocks(blocks)) => {
@@ -30,8 +30,7 @@ fn extract_first_user_message_text(messages: &[Message]) -> &str {
                 .iter()
                 .find(|block| block.r#type == Some("text".to_string()));
             text_block
-                .map(|block| block.text.as_deref())
-                .flatten()
+                .and_then(|block| block.text.as_deref())
                 .unwrap_or("")
         }
         _ => "",

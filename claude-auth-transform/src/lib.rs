@@ -22,6 +22,16 @@ static SESSION_ID: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().to_string(
 static ENV_VERSION: LazyLock<Option<String>> =
     LazyLock::new(|| env::var("ANTHROPIC_CLI_VERSION").ok());
 
+/// Transform an anthropic API request into a authenticated Claude API request.
+///
+/// # Arguments
+///
+/// * `request`: The HTTP request to transform
+/// * `access_token`: The access token to use for authentication
+///
+/// # Errors
+///
+/// * `Error`: If the request cannot be transformed, e.g., due to invalid body encoding
 pub fn transform_request<B>(
     request: http::Request<B>,
     access_token: &str,
@@ -31,7 +41,7 @@ where
 {
     let (mut parts, body) = request.into_parts();
 
-    build_request_headers(&mut parts.headers, &access_token, "claude-opus-4-6");
+    build_request_headers(&mut parts.headers, access_token, "claude-opus-4-6");
 
     let body = transform_body(body.as_ref())?;
 
@@ -46,8 +56,7 @@ fn build_request_headers(headers: &mut HeaderMap, access_token: &str, model_id: 
     trace!(?model_betas, model_id, "Model betas");
     let incoming_beta = headers
         .get("anthropic-beta")
-        .map(|v| v.to_str().unwrap_or(""))
-        .unwrap_or("");
+        .map_or("", |v| v.to_str().unwrap_or(""));
     trace!(?incoming_beta, model_id, "Incoming betas");
     let merged_betas = model_betas
         .into_iter()
@@ -65,7 +74,7 @@ fn build_request_headers(headers: &mut HeaderMap, access_token: &str, model_id: 
 
     headers.insert(
         "Authorization",
-        HeaderValue::from_str(&format!("Bearer {}", access_token)).unwrap(),
+        HeaderValue::from_str(&format!("Bearer {access_token}")).unwrap(),
     );
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     headers.insert("anthropic-beta", merged_betas);

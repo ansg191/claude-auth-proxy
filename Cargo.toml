@@ -5,6 +5,13 @@ members = [
     "claude-auth-transform"
 ]
 
+[workspace.lints.clippy]
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[lints]
+workspace = true
+
 [package]
 name = "claude-auth-proxy"
 version = "0.1.0"

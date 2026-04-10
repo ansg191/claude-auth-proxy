@@ -10,15 +10,16 @@ static ENV_BETA_FLAGS: LazyLock<Option<String>> =
     LazyLock::new(|| env::var("ANTHROPIC_BETA_FLAGS").ok());
 
 fn get_required_betas() -> Vec<&'static str> {
-    if let Some(flags) = ENV_BETA_FLAGS.as_deref() {
-        flags
-            .split(',')
-            .map(|x| x.trim())
-            .filter(|x| !x.is_empty())
-            .collect()
-    } else {
-        Vec::from(CONFIG.base_betas)
-    }
+    ENV_BETA_FLAGS.as_deref().map_or_else(
+        || Vec::from(CONFIG.base_betas),
+        |flags| {
+            flags
+                .split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .collect()
+        },
+    )
 }
 
 pub static BETA_MANAGER: LazyLock<BetaManager> = LazyLock::new(BetaManager::new);

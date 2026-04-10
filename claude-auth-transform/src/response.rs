@@ -40,7 +40,7 @@ fn strip_tool_prefix(input: &[u8]) -> Bytes {
 /// tool-prefix stripping applied.
 #[pin_project::pin_project]
 pub struct ClaudeBody<B> {
-    /// The underlying http_body::Body
+    /// The underlying [`http_body::Body`]
     #[pin]
     inner: B,
     /// SSE line buffer for reassembling partial events

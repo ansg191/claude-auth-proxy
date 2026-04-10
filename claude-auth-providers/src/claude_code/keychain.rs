@@ -25,6 +25,7 @@ use crate::{
 };
 
 const PRIMARY_SERVICE: &str = "Claude Code-credentials";
+const SERVICE_PREFIX: &str = "Claude Code-credentials-";
 
 pub fn get_credentials() -> Result<Vec<ClaudeCredential>, Error> {
     Ok(list_all_credentials()?
@@ -47,7 +48,7 @@ fn list_all_credentials() -> SFResult<Vec<(String, String)>> {
     unsafe {
         cvt(SecItemCopyMatching(
             query.as_concrete_TypeRef(),
-            &mut result,
+            &raw mut result,
         ))?;
     }
     if result.is_null() {
@@ -121,12 +122,8 @@ fn is_claude_code_credential(svc: &str) -> bool {
         return true;
     }
 
-    const PREFIX: &str = "Claude Code-credentials-";
-    if let Some(hex) = svc.strip_prefix(PREFIX) {
-        !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())
-    } else {
-        false
-    }
+    svc.strip_prefix(SERVICE_PREFIX)
+        .is_some_and(|hex| !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 fn cvt(status: i32) -> SFResult<()> {
@@ -138,6 +135,7 @@ fn cvt(status: i32) -> SFResult<()> {
 }
 
 #[cfg(test)]
+#[allow(unused)]
 mod tests {
     use super::*;
 
@@ -158,7 +156,7 @@ mod tests {
         pub fn new(acct: &str, svc: &str, value: &str) -> Self {
             security_framework::passwords::set_generic_password(svc, acct, value.as_bytes())
                 .expect("failed to add test credential to keychain");
-            TestCredential {
+            Self {
                 acct: acct.to_owned(),
                 svc: svc.to_owned(),
             }
@@ -168,6 +166,6 @@ mod tests {
     #[test]
     fn test_list_all_credentials() {
         let x = list_all_credentials().unwrap();
-        println!("{:?}", x);
+        println!("{x:?}");
     }
 }

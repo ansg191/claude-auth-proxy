@@ -21,7 +21,7 @@ async fn main() {
         .route("/v1/{*rest}", axum::routing::any(messages_handler))
         .with_state(auth);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap()
+    axum::serve(listener, app).await.unwrap();
 }
 
 async fn messages_handler(

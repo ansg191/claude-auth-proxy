@@ -1,4 +1,8 @@
-use std::{collections::HashSet, env, sync::LazyLock};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    sync::LazyLock,
+};
 
 use tracing::{debug, trace};
 
@@ -14,6 +18,7 @@ static ENV_ENTRYPOINT: LazyLock<Option<String>> =
 
 const SYSTEM_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 const TOOL_PREFIX: &str = "mcp_";
+const BILLING_PREFIX: &str = "x-anthropic-billing-header";
 
 pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     let Ok(mut parsed): Result<MessageBody, _> = serde_json::from_slice(bytes) else {
@@ -32,8 +37,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         !(e.r#type.as_deref() == Some("text")
             && e.text
                 .as_deref()
-                .map(|t| t.starts_with("x-anthropic-billing-header"))
-                .unwrap_or(false))
+                .is_some_and(|t| t.starts_with("x-anthropic-billing-header")))
     });
 
     // Insert billing header as system[0], without cache_control
@@ -42,7 +46,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         SystemEntry {
             r#type: Some("text".to_owned()),
             text: Some(billing_header),
-            extra: Default::default(),
+            extra: HashMap::default(),
         },
     );
 
@@ -55,8 +59,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         entry
             .text
             .as_deref()
-            .map(|t| t.contains(SYSTEM_IDENTITY))
-            .unwrap_or(false)
+            .is_some_and(|t| t.contains(SYSTEM_IDENTITY))
     });
     if !has_identity {
         trace!("Identity prefix not found in system entries, injecting");
@@ -65,7 +68,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
             SystemEntry {
                 r#type: Some("text".to_owned()),
                 text: Some(SYSTEM_IDENTITY.to_owned()),
-                extra: Default::default(),
+                extra: HashMap::default(),
             },
         );
     }
@@ -98,7 +101,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
                 extra: props.clone(),
             });
 
-            if rest.len() > 0 {
+            if !rest.is_empty() {
                 // Push remainder
                 if let Some(cc) = cache_control {
                     props.insert("cache_control".to_owned(), cc);
@@ -124,7 +127,6 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     // Work-around: keep only the billing header and identity prefix in
     // system[], and prepend all other system content to the first user
     // message where it is functionally equivalent but avoids the check.
-    const BILLING_PREFIX: &str = "x-anthropic-billing-header";
     let mut kept_system = Vec::with_capacity(2);
     let mut moved_texts = Vec::with_capacity(parsed.system.len());
 
@@ -134,12 +136,12 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
         {
             kept_system.push(entry.clone());
         } else if let Some(txt) = entry.text.as_deref()
-            && txt.len() > 0
+            && !txt.is_empty()
         {
             moved_texts.push(txt.to_owned());
         }
     }
-    if moved_texts.len() > 0 {
+    if !moved_texts.is_empty() {
         trace!(
             texts_moved = moved_texts.len(),
             "system entries moved to user messages"
@@ -153,7 +155,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
             let prefix = moved_texts.join("\n\n");
             match first_user.content {
                 Some(MessageContent::Text(ref mut txt)) => {
-                    *txt = format!("{}\n\n{}", prefix, txt);
+                    *txt = format!("{prefix}\n\n{txt}");
                 }
                 Some(MessageContent::Blocks(ref mut blocks)) => {
                     blocks.insert(
@@ -161,7 +163,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
                         SystemEntry {
                             r#type: Some("text".to_owned()),
                             text: Some(prefix),
-                            extra: Default::default(),
+                            extra: HashMap::default(),
                         },
                     );
                 }
@@ -196,7 +198,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 
     parsed.messages.iter_mut().for_each(|message| {
         if let Some(MessageContent::Blocks(blocks)) = message.content.as_mut() {
-            blocks.iter_mut().for_each(|block| {
+            for block in blocks.iter_mut() {
                 if let Some(tp) = block.r#type.as_deref()
                     && tp == "tool_use"
                     && let Some(name) = block.extra.get_mut("name")
@@ -204,7 +206,7 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
                 {
                     *name = format!("{}{}", TOOL_PREFIX, name.as_str().unwrap()).into();
                 }
-            });
+            }
         }
     });
 
@@ -245,11 +247,11 @@ fn repair_tool_pairs(messages: &mut Vec<Message>) {
     // Find orphaned IDs
     let orphaned_uses = tool_use_ids
         .difference(&tool_result_ids)
-        .map(|id| id.to_string())
+        .map(ToString::to_string)
         .collect::<HashSet<_>>();
     let orphaned_results = tool_result_ids
         .difference(&tool_use_ids)
-        .map(|id| id.to_string())
+        .map(ToString::to_string)
         .collect::<HashSet<_>>();
 
     // Return early if nothing to fix
@@ -258,9 +260,9 @@ fn repair_tool_pairs(messages: &mut Vec<Message>) {
     }
 
     // Filter orphaned blocks and remove messages with empty content arrays
-    messages.iter_mut().for_each(|msg| {
+    for msg in messages.iter_mut() {
         let Some(MessageContent::Blocks(blocks)) = msg.content.as_mut() else {
-            return;
+            continue;
         };
 
         blocks.retain(|block| {
@@ -278,9 +280,9 @@ fn repair_tool_pairs(messages: &mut Vec<Message>) {
                 return !orphaned_results.contains(tool_use_id);
             }
 
-            return true;
+            true
         });
-    });
+    }
 
     messages.retain(|msg| match msg.content {
         None => false,
@@ -291,351 +293,347 @@ fn repair_tool_pairs(messages: &mut Vec<Message>) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use super::*;
 
-    #[cfg(test)]
-    mod tests {
-        use serde_json::{Value, json};
+    #[allow(clippy::needless_pass_by_value)]
+    fn run_transform(input: Value) -> Value {
+        let bytes = serde_json::to_vec(&input).unwrap();
+        let output = transform_body(&bytes).unwrap();
+        serde_json::from_slice(&output).unwrap()
+    }
 
-        use super::*;
+    #[test]
+    fn transform_body_moves_non_core_system_text_and_prefixes_tool_names() {
+        let input = json!({
+            "system": [{ "type": "text", "text": "OpenCode and opencode" }],
+            "tools": [{ "name": "search" }],
+            "messages": [
+                { "role": "user", "content": [{ "type": "tool_use", "name": "lookup" }] }
+            ]
+        });
 
-        fn run_transform(input: Value) -> Value {
-            let bytes = serde_json::to_vec(&input).unwrap();
-            let output = transform_body(&bytes).unwrap();
-            serde_json::from_slice(&output).unwrap()
-        }
+        let parsed = run_transform(input);
 
-        #[test]
-        fn transform_body_moves_non_core_system_text_and_prefixes_tool_names() {
-            let input = json!({
-                "system": [{ "type": "text", "text": "OpenCode and opencode" }],
-                "tools": [{ "name": "search" }],
-                "messages": [
-                    { "role": "user", "content": [{ "type": "tool_use", "name": "lookup" }] }
-                ]
-            });
-
-            let parsed = run_transform(input);
-
-            assert_eq!(parsed["system"].as_array().unwrap().len(), 1);
-            assert!(
-                parsed["system"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("x-anthropic-billing-header:")
-            );
-
-            assert_eq!(parsed["messages"][0]["content"][0]["type"], "text");
-            assert_eq!(
-                parsed["messages"][0]["content"][0]["text"],
-                "OpenCode and opencode"
-            );
-            assert_eq!(parsed["tools"][0]["name"], "mcp_search");
-            assert_eq!(parsed["messages"][0]["content"][1]["name"], "mcp_lookup");
-        }
-
-        #[test]
-        fn transform_body_relocates_non_core_system_text_to_user_message() {
-            let input = json!({
-                "system": [{ "type": "text", "text": "Use opencode-claude-auth plugin instructions as-is." }],
-                "messages": [{ "role": "user", "content": "hello" }]
-            });
-
-            let parsed = run_transform(input);
-
-            assert_eq!(parsed["system"].as_array().unwrap().len(), 1);
-            assert!(
-                parsed["messages"][0]["content"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Use opencode-claude-auth plugin instructions as-is.")
-            );
-        }
-
-        #[test]
-        fn transform_body_relocates_url_path_system_text_to_user_message() {
-            let input = json!({
-                "system": [{ "type": "text", "text": "OpenCode docs: https://example.com/opencode/docs and path /var/opencode/bin" }],
-                "messages": [{ "role": "user", "content": "hello" }]
-            });
-
-            let parsed = run_transform(input);
-
-            assert_eq!(parsed["system"].as_array().unwrap().len(), 1);
-            assert!(parsed["messages"][0]["content"].as_str().unwrap().contains(
-                "OpenCode docs: https://example.com/opencode/docs and path /var/opencode/bin"
-            ));
-        }
-
-        #[test]
-        fn transform_body_injects_billing_header_with_computed_cch() {
-            let input = json!({
-                "system": [{ "type": "text", "text": "system prompt" }],
-                "messages": [{ "role": "user", "content": "hey" }]
-            });
-
-            let parsed = run_transform(input);
-            let billing = parsed["system"][0]["text"].as_str().unwrap();
-
-            assert!(billing.starts_with("x-anthropic-billing-header:"));
-            assert!(
-                billing.contains("cch=fa690"),
-                "Expected cch=fa690, got: {billing}"
-            );
-        }
-
-        #[test]
-        fn transform_body_billing_header_has_no_cache_control() {
-            let input = json!({
-                "system": [{ "type": "text", "text": "prompt", "cache_control": { "type": "ephemeral" } }],
-                "messages": [{ "role": "user", "content": "test" }]
-            });
-
-            let parsed = run_transform(input);
-            assert!(parsed["system"][0].get("cache_control").is_none());
-        }
-
-        #[test]
-        fn transform_body_splits_identity_prefix_and_relocates_remainder() {
-            let identity = "You are Claude Code, Anthropic's official CLI for Claude.";
-            let input = json!({
-                "system": [{ "type": "text", "text": format!("{identity}\nWorking directory: /home/test") }],
-                "messages": [{ "role": "user", "content": "test" }]
-            });
-
-            let parsed = run_transform(input);
-
-            assert!(
-                parsed["system"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("x-anthropic-billing-header:")
-            );
-            assert_eq!(parsed["system"][1]["text"], identity);
-            assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
-            assert!(
-                parsed["messages"][0]["content"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Working directory: /home/test")
-            );
-        }
-
-        #[test]
-        fn transform_body_preserves_identity_without_cache_control_and_relocates_remainder() {
-            let identity = "You are Claude Code, Anthropic's official CLI for Claude.";
-            let input = json!({
-                "system": [{
-                    "type": "text",
-                    "text": format!("{identity}\nMore content here"),
-                    "cache_control": { "type": "ephemeral", "ttl": "1h" }
-                }],
-                "messages": [{ "role": "user", "content": "test" }]
-            });
-
-            let parsed = run_transform(input);
-
-            assert!(parsed["system"][1].get("cache_control").is_none());
-            assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
-            assert!(
-                parsed["messages"][0]["content"]
-                    .as_str()
-                    .unwrap()
-                    .contains("More content here")
-            );
-        }
-
-        #[test]
-        fn transform_body_does_not_split_identity_only_entry() {
-            let identity = "You are Claude Code, Anthropic's official CLI for Claude.";
-            let input = json!({
-                "system": [{ "type": "text", "text": identity }],
-                "messages": [{ "role": "user", "content": "test" }]
-            });
-
-            let parsed = run_transform(input);
-
-            assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
-            assert_eq!(parsed["system"][1]["text"], identity);
-        }
-
-        #[test]
-        fn transform_body_removes_duplicate_billing_headers_and_relocates_non_core_text() {
-            let input = json!({
-                "system": [
-                    { "type": "text", "text": "x-anthropic-billing-header: cc_version=old; cc_entrypoint=cli; cch=00000;" },
-                    { "type": "text", "text": "prompt" }
-                ],
-                "messages": [{ "role": "user", "content": "hey" }]
-            });
-
-            let parsed = run_transform(input);
-            let billing_entries: Vec<&Value> = parsed["system"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|e| {
-                    e["text"]
-                        .as_str()
-                        .unwrap_or("")
-                        .starts_with("x-anthropic-billing-header:")
-                })
-                .collect();
-
-            assert_eq!(billing_entries.len(), 1);
-            assert!(
-                billing_entries[0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("cch=fa690")
-            );
-            assert!(
-                parsed["messages"][0]["content"]
-                    .as_str()
-                    .unwrap()
-                    .contains("prompt")
-            );
-        }
-
-        #[test]
-        fn transform_body_relocates_multiple_non_core_system_entries_to_user_blocks() {
-            let identity = "You are Claude Code, Anthropic's official CLI for Claude.";
-            let input = json!({
-                "system": [
-                    { "type": "text", "text": identity },
-                    { "type": "text", "text": "Custom instructions block A" },
-                    { "type": "text", "text": "Custom instructions block B" }
-                ],
-                "messages": [{
-                    "role": "user",
-                    "content": [{ "type": "text", "text": "hello" }]
-                }]
-            });
-
-            let parsed = run_transform(input);
-
-            assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
-            assert!(
-                parsed["system"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("x-anthropic-billing-header:")
-            );
-            assert_eq!(parsed["system"][1]["text"], identity);
-
-            assert_eq!(parsed["messages"][0]["content"][0]["type"], "text");
-            let prepended = parsed["messages"][0]["content"][0]["text"]
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 1);
+        assert!(
+            parsed["system"][0]["text"]
                 .as_str()
-                .unwrap();
-            assert!(prepended.contains("Custom instructions block A"));
-            assert!(prepended.contains("Custom instructions block B"));
-            assert_eq!(parsed["messages"][0]["content"][1]["text"], "hello");
-        }
+                .unwrap()
+                .starts_with("x-anthropic-billing-header:")
+        );
 
-        #[test]
-        fn transform_body_keeps_system_when_no_messages_exist() {
-            let input = json!({
-                "system": [{ "type": "text", "text": "Some instructions" }],
-                "messages": []
-            });
+        assert_eq!(parsed["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            parsed["messages"][0]["content"][0]["text"],
+            "OpenCode and opencode"
+        );
+        assert_eq!(parsed["tools"][0]["name"], "mcp_search");
+        assert_eq!(parsed["messages"][0]["content"][1]["name"], "mcp_lookup");
+    }
 
-            let parsed = run_transform(input);
+    #[test]
+    fn transform_body_relocates_non_core_system_text_to_user_message() {
+        let input = json!({
+            "system": [{ "type": "text", "text": "Use opencode-claude-auth plugin instructions as-is." }],
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
 
-            assert!(parsed["system"].as_array().unwrap().len() >= 2);
-        }
+        let parsed = run_transform(input);
 
-        #[test]
-        fn transform_body_strips_output_config_effort_for_haiku() {
-            let input = json!({
-                "model": "claude-haiku-4-5-20251001",
-                "output_config": { "effort": "high" },
-                "messages": [{ "role": "user", "content": "test" }]
-            });
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 1);
+        assert!(
+            parsed["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Use opencode-claude-auth plugin instructions as-is.")
+        );
+    }
 
-            let parsed = run_transform(input);
-            assert!(parsed.get("output_config").is_none());
-        }
+    #[test]
+    fn transform_body_relocates_url_path_system_text_to_user_message() {
+        let input = json!({
+            "system": [{ "type": "text", "text": "OpenCode docs: https://example.com/opencode/docs and path /var/opencode/bin" }],
+            "messages": [{ "role": "user", "content": "hello" }]
+        });
 
-        #[test]
-        fn transform_body_strips_effort_but_keeps_other_output_config_for_haiku() {
-            let input = json!({
-                "model": "claude-haiku-4-5-20251001",
-                "output_config": { "effort": "high", "max_tokens": 1024 },
-                "messages": [{ "role": "user", "content": "test" }]
-            });
+        let parsed = run_transform(input);
 
-            let parsed = run_transform(input);
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 1);
+        assert!(parsed["messages"][0]["content"].as_str().unwrap().contains(
+            "OpenCode docs: https://example.com/opencode/docs and path /var/opencode/bin"
+        ));
+    }
 
-            assert!(parsed.get("output_config").is_some());
-            assert_eq!(parsed["output_config"]["max_tokens"], 1024);
-            assert!(parsed["output_config"].get("effort").is_none());
-        }
+    #[test]
+    fn transform_body_injects_billing_header_with_computed_cch() {
+        let input = json!({
+            "system": [{ "type": "text", "text": "system prompt" }],
+            "messages": [{ "role": "user", "content": "hey" }]
+        });
 
-        #[test]
-        fn transform_body_strips_thinking_effort_but_preserves_other_fields_for_haiku() {
-            let input = json!({
-                "model": "claude-haiku-4-5-20251001",
-                "thinking": { "type": "enabled", "effort": "high" },
-                "messages": [{ "role": "user", "content": "test" }]
-            });
+        let parsed = run_transform(input);
+        let billing = parsed["system"][0]["text"].as_str().unwrap();
 
-            let parsed = run_transform(input);
+        assert!(billing.starts_with("x-anthropic-billing-header:"));
+        assert!(
+            billing.contains("cch=fa690"),
+            "Expected cch=fa690, got: {billing}"
+        );
+    }
 
-            assert!(parsed.get("thinking").is_some());
-            assert!(parsed["thinking"].get("effort").is_none());
-            assert_eq!(parsed["thinking"]["type"], "enabled");
-        }
+    #[test]
+    fn transform_body_billing_header_has_no_cache_control() {
+        let input = json!({
+            "system": [{ "type": "text", "text": "prompt", "cache_control": { "type": "ephemeral" } }],
+            "messages": [{ "role": "user", "content": "test" }]
+        });
 
-        #[test]
-        fn transform_body_removes_thinking_when_effort_only_for_haiku() {
-            let input = json!({
-                "model": "claude-haiku-4-5-20251001",
-                "thinking": { "effort": "high" },
-                "messages": [{ "role": "user", "content": "test" }]
-            });
+        let parsed = run_transform(input);
+        assert!(parsed["system"][0].get("cache_control").is_none());
+    }
 
-            let parsed = run_transform(input);
-            assert!(parsed.get("thinking").is_none());
-        }
+    #[test]
+    fn transform_body_splits_identity_prefix_and_relocates_remainder() {
+        let identity = "You are Claude Code, Anthropic's official CLI for Claude.";
+        let input = json!({
+            "system": [{ "type": "text", "text": format!("{identity}\nWorking directory: /home/test") }],
+            "messages": [{ "role": "user", "content": "test" }]
+        });
 
-        #[test]
-        fn transform_body_preserves_thinking_for_haiku_when_effort_absent() {
-            let input = json!({
-                "model": "claude-haiku-4-5-20251001",
-                "thinking": { "type": "enabled" },
-                "messages": [{ "role": "user", "content": "test" }]
-            });
+        let parsed = run_transform(input);
 
-            let parsed = run_transform(input);
-            assert_eq!(parsed["thinking"], json!({ "type": "enabled" }));
-        }
+        assert!(
+            parsed["system"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("x-anthropic-billing-header:")
+        );
+        assert_eq!(parsed["system"][1]["text"], identity);
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
+        assert!(
+            parsed["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Working directory: /home/test")
+        );
+    }
 
-        #[test]
-        fn transform_body_preserves_effort_for_non_haiku_models() {
-            let input = json!({
-                "model": "claude-opus-4-6",
-                "output_config": { "effort": "high" },
-                "thinking": { "type": "enabled", "effort": "high" },
-                "messages": [{ "role": "user", "content": "test" }]
-            });
+    #[test]
+    fn transform_body_preserves_identity_without_cache_control_and_relocates_remainder() {
+        let identity = "You are Claude Code, Anthropic's official CLI for Claude.";
+        let input = json!({
+            "system": [{
+                "type": "text",
+                "text": format!("{identity}\nMore content here"),
+                "cache_control": { "type": "ephemeral", "ttl": "1h" }
+            }],
+            "messages": [{ "role": "user", "content": "test" }]
+        });
 
-            let parsed = run_transform(input);
+        let parsed = run_transform(input);
 
-            assert_eq!(parsed["output_config"]["effort"], "high");
-            assert_eq!(parsed["thinking"]["effort"], "high");
-        }
+        assert!(parsed["system"][1].get("cache_control").is_none());
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
+        assert!(
+            parsed["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("More content here")
+        );
+    }
 
-        #[test]
-        fn transform_body_handles_haiku_without_effort_related_fields() {
-            let input = json!({
-                "model": "claude-haiku-4-5",
-                "messages": [{ "role": "user", "content": "test" }]
-            });
+    #[test]
+    fn transform_body_does_not_split_identity_only_entry() {
+        let identity = "You are Claude Code, Anthropic's official CLI for Claude.";
+        let input = json!({
+            "system": [{ "type": "text", "text": identity }],
+            "messages": [{ "role": "user", "content": "test" }]
+        });
 
-            let parsed = run_transform(input);
+        let parsed = run_transform(input);
 
-            assert!(parsed.get("output_config").is_none());
-            assert!(parsed.get("thinking").is_none());
-        }
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["system"][1]["text"], identity);
+    }
+
+    #[test]
+    fn transform_body_removes_duplicate_billing_headers_and_relocates_non_core_text() {
+        let input = json!({
+            "system": [
+                { "type": "text", "text": "x-anthropic-billing-header: cc_version=old; cc_entrypoint=cli; cch=00000;" },
+                { "type": "text", "text": "prompt" }
+            ],
+            "messages": [{ "role": "user", "content": "hey" }]
+        });
+
+        let parsed = run_transform(input);
+        let billing_entries: Vec<&Value> = parsed["system"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("x-anthropic-billing-header:")
+            })
+            .collect();
+
+        assert_eq!(billing_entries.len(), 1);
+        assert!(
+            billing_entries[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("cch=fa690")
+        );
+        assert!(
+            parsed["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("prompt")
+        );
+    }
+
+    #[test]
+    fn transform_body_relocates_multiple_non_core_system_entries_to_user_blocks() {
+        let identity = "You are Claude Code, Anthropic's official CLI for Claude.";
+        let input = json!({
+            "system": [
+                { "type": "text", "text": identity },
+                { "type": "text", "text": "Custom instructions block A" },
+                { "type": "text", "text": "Custom instructions block B" }
+            ],
+            "messages": [{
+                "role": "user",
+                "content": [{ "type": "text", "text": "hello" }]
+            }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert_eq!(parsed["system"].as_array().unwrap().len(), 2);
+        assert!(
+            parsed["system"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("x-anthropic-billing-header:")
+        );
+        assert_eq!(parsed["system"][1]["text"], identity);
+
+        assert_eq!(parsed["messages"][0]["content"][0]["type"], "text");
+        let prepended = parsed["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(prepended.contains("Custom instructions block A"));
+        assert!(prepended.contains("Custom instructions block B"));
+        assert_eq!(parsed["messages"][0]["content"][1]["text"], "hello");
+    }
+
+    #[test]
+    fn transform_body_keeps_system_when_no_messages_exist() {
+        let input = json!({
+            "system": [{ "type": "text", "text": "Some instructions" }],
+            "messages": []
+        });
+
+        let parsed = run_transform(input);
+
+        assert!(parsed["system"].as_array().unwrap().len() >= 2);
+    }
+
+    #[test]
+    fn transform_body_strips_output_config_effort_for_haiku() {
+        let input = json!({
+            "model": "claude-haiku-4-5-20251001",
+            "output_config": { "effort": "high" },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+        assert!(parsed.get("output_config").is_none());
+    }
+
+    #[test]
+    fn transform_body_strips_effort_but_keeps_other_output_config_for_haiku() {
+        let input = json!({
+            "model": "claude-haiku-4-5-20251001",
+            "output_config": { "effort": "high", "max_tokens": 1024 },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert!(parsed.get("output_config").is_some());
+        assert_eq!(parsed["output_config"]["max_tokens"], 1024);
+        assert!(parsed["output_config"].get("effort").is_none());
+    }
+
+    #[test]
+    fn transform_body_strips_thinking_effort_but_preserves_other_fields_for_haiku() {
+        let input = json!({
+            "model": "claude-haiku-4-5-20251001",
+            "thinking": { "type": "enabled", "effort": "high" },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert!(parsed.get("thinking").is_some());
+        assert!(parsed["thinking"].get("effort").is_none());
+        assert_eq!(parsed["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn transform_body_removes_thinking_when_effort_only_for_haiku() {
+        let input = json!({
+            "model": "claude-haiku-4-5-20251001",
+            "thinking": { "effort": "high" },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+        assert!(parsed.get("thinking").is_none());
+    }
+
+    #[test]
+    fn transform_body_preserves_thinking_for_haiku_when_effort_absent() {
+        let input = json!({
+            "model": "claude-haiku-4-5-20251001",
+            "thinking": { "type": "enabled" },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+        assert_eq!(parsed["thinking"], json!({ "type": "enabled" }));
+    }
+
+    #[test]
+    fn transform_body_preserves_effort_for_non_haiku_models() {
+        let input = json!({
+            "model": "claude-opus-4-6",
+            "output_config": { "effort": "high" },
+            "thinking": { "type": "enabled", "effort": "high" },
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert_eq!(parsed["output_config"]["effort"], "high");
+        assert_eq!(parsed["thinking"]["effort"], "high");
+    }
+
+    #[test]
+    fn transform_body_handles_haiku_without_effort_related_fields() {
+        let input = json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{ "role": "user", "content": "test" }]
+        });
+
+        let parsed = run_transform(input);
+
+        assert!(parsed.get("output_config").is_none());
+        assert!(parsed.get("thinking").is_none());
     }
 }

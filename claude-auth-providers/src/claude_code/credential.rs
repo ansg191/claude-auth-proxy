@@ -15,6 +15,7 @@ pub fn parse_credentials(raw: &str) -> Option<ClaudeCredential> {
     let data = {
         let mut parsed = serde_json::from_str::<Value>(raw).ok()?;
 
+        #[allow(clippy::option_if_let_else)]
         if let Some(claude_ai_oauth) = parsed.get_mut("claudeAiOauth") {
             claude_ai_oauth.take()
         } else {

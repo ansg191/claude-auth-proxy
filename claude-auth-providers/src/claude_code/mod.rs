@@ -12,6 +12,12 @@ pub struct ClaudeCodeAuthProvider {
     active: usize,
 }
 
+impl Default for ClaudeCodeAuthProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClaudeCodeAuthProvider {
     pub fn new() -> Self {
         let mut creds = Vec::new();
@@ -32,14 +38,12 @@ impl ClaudeCodeAuthProvider {
 }
 
 impl ClaudeAuthProvider for ClaudeCodeAuthProvider {
-    fn get_access_token(&self) -> impl Future<Output = Result<String, Error>> {
-        async move {
-            // TODO: Implement expiry checks & refreshing
+    async fn get_access_token(&self) -> Result<String, Error> {
+        // TODO: Implement expiry checks & refreshing
 
-            self.creds
-                .get(self.active)
-                .map(|cred| cred.access_token.clone())
-                .ok_or_else(|| Error::NoCredentials)
-        }
+        self.creds
+            .get(self.active)
+            .map(|cred| cred.access_token.clone())
+            .ok_or(Error::NoCredentials)
     }
 }
