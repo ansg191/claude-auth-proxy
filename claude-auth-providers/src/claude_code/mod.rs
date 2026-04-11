@@ -52,7 +52,7 @@ impl ClaudeCodeAuthProvider {
         // Source 2: ~/.claude/.credentials.json (cross-platform fallback)
         creds.extend(credentials_file::get_credentials());
 
-        // Deduplicate by access_token — keychain and file may contain the
+        // Deduplicate by access_token: keychain and file may contain the
         // same credential on macOS (Claude Code mirrors to both locations).
         let mut seen = HashSet::new();
         creds.retain(|c| seen.insert(c.access_token.clone()));

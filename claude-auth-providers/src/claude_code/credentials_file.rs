@@ -23,7 +23,7 @@ pub fn get_credentials() -> Vec<ClaudeCredential> {
 /// Reads and parses credentials from the given file path. Returns an empty
 /// vec on any failure (missing file, parse error, etc.).
 fn load_from(path: &Path) -> Vec<ClaudeCredential> {
-    let raw = match std::fs::read_to_string(path) {
+    let contents = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             debug!(path = %path.display(), "Credentials file not found");
@@ -36,7 +36,7 @@ fn load_from(path: &Path) -> Vec<ClaudeCredential> {
     };
 
     #[allow(clippy::option_if_let_else)]
-    if let Some(cred) = parse_credentials(&raw) {
+    if let Some(cred) = parse_credentials(&contents) {
         debug!(path = %path.display(), "Loaded credential from file");
         vec![cred]
     } else {
