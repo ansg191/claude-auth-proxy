@@ -178,7 +178,7 @@ async fn execute_with_retry(
         let reqwest_req = reqwest::Request::try_from(http_req).unwrap();
 
         match state.client.execute(reqwest_req).await {
-            Ok(res) => {
+            Ok(mut res) => {
                 if let Some(delay) = retry_delay(
                     res.status(),
                     attempt,
@@ -193,16 +193,19 @@ async fn execute_with_retry(
                         delay_secs = delay.as_secs(),
                         "Retryable upstream status, retrying after delay"
                     );
-                    // Drain the response body so reqwest can return the
-                    // connection to its pool before we sleep.
-                    let _ = res.bytes().await;
+                    // Drain the response body in a streaming fashion so the
+                    // connection can be returned to the pool without
+                    // buffering a potentially large error body in memory.
+                    while let Ok(Some(_)) = res.chunk().await {}
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
                 }
                 return res;
             }
-            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < state.config.max_retries => {
+            Err(e)
+                if (e.is_timeout() || e.is_connect()) && attempt + 1 < state.config.max_retries =>
+            {
                 let delay = Duration::from_secs(u64::from(attempt + 1) * 2);
                 debug!(
                     error = %e,
@@ -317,12 +320,12 @@ mod tests {
     fn retry_delay_ignores_unparseable_retry_after() {
         let headers = headers_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT");
         let delay = retry_delay(StatusCode::TOO_MANY_REQUESTS, 0, &headers, 3, false, 1);
-        // Falls back to exponential backoff
+        // Falls back to linear backoff
         assert_eq!(delay, Some(Duration::from_secs(2)));
     }
 
     #[test]
-    fn retry_delay_exponential_backoff_progression() {
+    fn retry_delay_linear_backoff_progression() {
         let headers = empty_headers();
         assert_eq!(
             retry_delay(StatusCode::TOO_MANY_REQUESTS, 0, &headers, 5, false, 1),
