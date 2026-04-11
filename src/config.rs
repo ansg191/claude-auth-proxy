@@ -70,7 +70,7 @@ fn parse_u32(var: &str, default: u32) -> u32 {
 }
 
 fn parse_bool(var: &str, default: bool) -> bool {
-    env::var(var).ok().map_or(default, |v| match v.as_str() {
+    env::var(var).ok().map_or(default, |v| match v.trim() {
         "1" | "true" | "TRUE" | "True" | "yes" | "YES" => true,
         "0" | "false" | "FALSE" | "False" | "no" | "NO" => false,
         _ => default,
