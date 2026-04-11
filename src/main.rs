@@ -1,4 +1,5 @@
 mod config;
+mod error;
 mod install;
 
 use std::{sync::Arc, time::Duration};
@@ -17,9 +18,9 @@ use claude_auth_transform::{transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
 use tokio::signal;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
-use crate::config::ServerConfig;
+use crate::{config::ServerConfig, error::AppError};
 
 /// Upper bound on honoring a `Retry-After` response header. Protects against a
 /// misbehaving upstream asking the proxy to stall for hours.
@@ -55,7 +56,7 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -65,23 +66,14 @@ async fn main() {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Run(config) => run(config).await,
-        Command::Install(args) => {
-            if let Err(e) = install::install(args) {
-                error!(error = %e, "install failed");
-                std::process::exit(1);
-            }
-        }
-        Command::Uninstall => {
-            if let Err(e) = install::uninstall() {
-                error!(error = %e, "uninstall failed");
-                std::process::exit(1);
-            }
-        }
+        Command::Run(config) => run(config).await?,
+        Command::Install(args) => install::install(args)?,
+        Command::Uninstall => install::uninstall()?,
     }
+    Ok(())
 }
 
-async fn run(config: ServerConfig) {
+async fn run(config: ServerConfig) -> std::io::Result<()> {
     tracing::info!(
         host = %config.host,
         port = config.port,
@@ -110,13 +102,13 @@ async fn run(config: ServerConfig) {
         .route("/ready", axum::routing::get(ready_handler))
         .route("/v1/{*rest}", axum::routing::any(messages_handler))
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind((host, port)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind((host, port)).await?;
     info!("Listening on {host}:{port}");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap();
+        .await?;
     info!("Server shutdown complete");
+    Ok(())
 }
 
 async fn shutdown_signal() {
@@ -156,7 +148,10 @@ async fn ready_handler(State(state): State<Arc<ServerState>>) -> impl IntoRespon
     }
 }
 
-async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -> Response {
+async fn messages_handler(
+    State(state): State<Arc<ServerState>>,
+    req: Request,
+) -> Result<Response, AppError> {
     let (mut parts, body) = req.into_parts();
     debug!("Received request: {} {}", parts.method, parts.uri);
 
@@ -171,7 +166,7 @@ async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -
         .authority("api.anthropic.com")
         .path_and_query(path_and_query)
         .build()
-        .unwrap();
+        .map_err(AppError::BuildUri)?;
 
     parts.headers.remove("host");
     parts.headers.remove("content-length");
@@ -179,12 +174,16 @@ async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -
     parts.headers.remove("connection");
     parts.headers.remove("accept-encoding");
 
-    let collected = body.collect().await.unwrap().to_bytes();
+    let collected = body
+        .collect()
+        .await
+        .map_err(AppError::BodyCollect)?
+        .to_bytes();
     let req = http::Request::from_parts(parts, collected);
 
-    let token = state.auth.get_access_token().await.unwrap();
+    let token = state.auth.get_access_token().await?;
 
-    let req = transform_request(req, &token).unwrap();
+    let req = transform_request(req, &token)?;
 
     let (parts, body) = req.into_parts();
     debug!("Forwarding request: {} {}", parts.method, parts.uri);
@@ -192,7 +191,7 @@ async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -
     // Convert the body to `Bytes` so that cloning for retries is cheap
     // (reference-counted) instead of deep-copying the Vec on each attempt.
     let body = Bytes::from(body);
-    let res = execute_with_retry(&state, parts, body).await;
+    let res = execute_with_retry(&state, parts, body).await?;
 
     // Convert reqwest::Response -> http::Response with a streaming body
     let status = res.status();
@@ -205,7 +204,7 @@ async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -
     *response.headers_mut() = headers;
 
     // Wrap through ClaudeBody to strip tool prefixes from SSE events
-    transform_response(response).map(Body::new)
+    Ok(transform_response(response).map(Body::new))
 }
 
 /// Execute the upstream request with retries for transient failures.
@@ -217,14 +216,14 @@ async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -
 /// - Network timeouts / connect errors: up to `config.max_retries` attempts
 ///
 /// On HTTP status exhaustion the final response is returned to the caller so
-/// the upstream error is propagated downstream. This function only panics on
-/// non-retryable network errors or when the network retry budget is exhausted,
-/// matching the existing `.unwrap()` behavior at this call site.
+/// the upstream error is propagated downstream. Non-retryable network failures
+/// and exhaustion of the network retry budget surface as
+/// [`AppError::Upstream`], which the handler renders as a 502 response.
 async fn execute_with_retry(
     state: &ServerState,
     parts: http::request::Parts,
     body: Bytes,
-) -> reqwest::Response {
+) -> Result<reqwest::Response, AppError> {
     // Each retry category has an independent budget: a failure in one
     // category must not consume retries reserved for another.
     let mut rate_limit_attempts: u32 = 0;
@@ -234,7 +233,7 @@ async fn execute_with_retry(
     loop {
         // Cloning `Bytes` is a cheap Arc bump, not a deep copy of the body.
         let http_req = http::Request::from_parts(parts.clone(), body.clone());
-        let reqwest_req = reqwest::Request::try_from(http_req).unwrap();
+        let reqwest_req = reqwest::Request::try_from(http_req).map_err(AppError::BuildRequest)?;
 
         match state.client.execute(reqwest_req).await {
             Ok(mut res) => {
@@ -250,14 +249,14 @@ async fn execute_with_retry(
                 } else if is_other_5xx && state.config.retry_on_5xx {
                     (&mut other_5xx_attempts, state.config.max_5xx_retries)
                 } else {
-                    return res;
+                    return Ok(res);
                 };
 
                 // `*attempt` is 0-indexed and counts the attempt just made.
                 // A budget of N means up to N total attempts, so once the
                 // initial call + prior retries reach the budget we stop.
                 if *attempt + 1 >= budget {
-                    return res;
+                    return Ok(res);
                 }
 
                 let delay = retry_delay(*attempt, res.headers());
@@ -288,7 +287,7 @@ async fn execute_with_retry(
                 tokio::time::sleep(delay).await;
                 network_attempts += 1;
             }
-            Err(e) => panic!("upstream request failed: {e}"),
+            Err(e) => return Err(AppError::Upstream(e)),
         }
     }
 }
