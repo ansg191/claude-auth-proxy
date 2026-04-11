@@ -23,7 +23,7 @@ pub async fn refresh_access_token(
         .expect("System time before UNIX EPOCH")
         .as_secs();
 
-    if now + EXPIRE_BUFFER.as_secs() >= creds.expires_at {
+    if now + EXPIRE_BUFFER.as_secs() < creds.expires_at {
         return Ok(creds);
     }
 
