@@ -1,86 +1,84 @@
 use std::{
-    env,
     net::{IpAddr, Ipv4Addr},
-    str::FromStr,
     time::Duration,
 };
 
-/// Runtime configuration for the proxy server, populated from environment
-/// variables on startup.
-#[derive(Debug, Clone)]
+use clap::Args;
+
+/// Runtime configuration for the proxy server.
+///
+/// Values are resolved by clap with the precedence
+/// `CLI flag > environment variable > compiled default`.
+#[derive(Debug, Clone, Args)]
 pub struct ServerConfig {
-    /// Host to bind the HTTP listener on.
+    /// Host address to bind the HTTP listener on.
+    #[arg(
+        long,
+        env = "CLAUDE_PROXY_HOST",
+        default_value_t = IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    )]
     pub host: IpAddr,
+
     /// Port to bind the HTTP listener on.
+    #[arg(long, env = "CLAUDE_PROXY_PORT", default_value_t = 3000)]
     pub port: u16,
-    /// Connect timeout for upstream requests.
+
+    /// Connect timeout for upstream requests, in seconds.
+    #[arg(
+        long = "connect-timeout",
+        env = "PROXY_CONNECT_TIMEOUT_SECS",
+        value_parser = parse_duration_secs,
+        default_value = "10",
+    )]
     pub connect_timeout: Duration,
-    /// Read timeout for upstream requests.
+
+    /// Read timeout for upstream requests, in seconds.
+    #[arg(
+        long = "read-timeout",
+        env = "PROXY_READ_TIMEOUT_SECS",
+        value_parser = parse_duration_secs,
+        default_value = "600",
+    )]
     pub read_timeout: Duration,
-    /// Maximum number of attempts for 429/529 responses (including the
-    /// initial attempt). A value of `3` means 1 initial attempt + 2 retries.
+
+    /// Maximum number of attempts for 429/529 responses and transient network
+    /// failures (including the initial attempt).
+    #[arg(long, env = "PROXY_MAX_RETRIES", default_value_t = 3)]
     pub max_retries: u32,
-    /// When `true`, 5xx server errors (other than 529) are also retried.
+
+    /// Retry generic 5xx responses (other than 529) up to `max_5xx_retries`.
+    ///
+    /// On the CLI this behaves both as a bare flag (`--retry-on-5xx`) and as
+    /// an explicit value (`--retry-on-5xx=true` / `--retry-on-5xx=false`).
+    /// As an environment variable it accepts the same values the previous
+    /// hand-rolled helper did: `1`/`0`/`true`/`false`/`yes`/`no`.
+    #[arg(
+        long,
+        env = "PROXY_RETRY_ON_5XX",
+        value_parser = parse_bool_flag,
+        num_args = 0..=1,
+        require_equals = true,
+        default_value_t = false,
+        default_missing_value = "true",
+    )]
     pub retry_on_5xx: bool,
-    /// Maximum number of attempts for 5xx responses when `retry_on_5xx` is
-    /// enabled. Typically shorter than `max_retries`.
+
+    /// Maximum number of attempts for generic 5xx responses when
+    /// `retry_on_5xx` is enabled. Typically shorter than `max_retries`.
+    #[arg(long, env = "PROXY_5XX_MAX_RETRIES", default_value_t = 1)]
     pub max_5xx_retries: u32,
 }
 
-impl ServerConfig {
-    /// Build a `ServerConfig` from environment variables, falling back to
-    /// sensible defaults when variables are unset or unparseable.
-    #[must_use]
-    pub fn from_env() -> Self {
-        Self {
-            host: parse_or_default("CLAUDE_PROXY_HOST", IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
-            port: parse_or_default("CLAUDE_PROXY_PORT", 3000),
-            connect_timeout: parse_duration_secs("PROXY_CONNECT_TIMEOUT_SECS", 10),
-            read_timeout: parse_duration_secs("PROXY_READ_TIMEOUT_SECS", 600),
-            max_retries: parse_or_default("PROXY_MAX_RETRIES", 3),
-            retry_on_5xx: parse_bool("PROXY_RETRY_ON_5XX", false),
-            max_5xx_retries: parse_or_default("PROXY_5XX_MAX_RETRIES", 1),
-        }
-    }
+fn parse_duration_secs(s: &str) -> Result<Duration, String> {
+    s.parse::<u64>()
+        .map(Duration::from_secs)
+        .map_err(|e| format!("invalid seconds value: {e}"))
 }
 
-fn parse_duration_secs(var: &str, default_secs: u64) -> Duration {
-    Duration::from_secs(parse_or_default(var, default_secs))
-}
-
-/// Read the environment variable `var`, parse it as `T`, and return the
-/// parsed value. If the variable is unset, return `default` silently. If it
-/// is set but cannot be parsed, log a warning and return `default` so a
-/// typo in a critical binding like `CLAUDE_PROXY_HOST` is visible in the
-/// startup logs rather than silently falling back.
-fn parse_or_default<T: FromStr>(var: &str, default: T) -> T {
-    let Ok(raw) = env::var(var) else {
-        return default;
-    };
-    raw.parse::<T>().unwrap_or_else(|_| {
-        tracing::warn!(
-            var,
-            value = %raw,
-            "Environment variable set but could not be parsed, falling back to default"
-        );
-        default
-    })
-}
-
-fn parse_bool(var: &str, default: bool) -> bool {
-    let Ok(raw) = env::var(var) else {
-        return default;
-    };
-    match raw.trim() {
-        "1" | "true" | "TRUE" | "True" | "yes" | "YES" => true,
-        "0" | "false" | "FALSE" | "False" | "no" | "NO" => false,
-        _ => {
-            tracing::warn!(
-                var,
-                value = %raw,
-                "Environment variable set but could not be parsed as a boolean, falling back to default"
-            );
-            default
-        }
+fn parse_bool_flag(s: &str) -> Result<bool, String> {
+    match s.trim() {
+        "1" | "true" | "TRUE" | "True" | "yes" | "YES" => Ok(true),
+        "0" | "false" | "FALSE" | "False" | "no" | "NO" => Ok(false),
+        other => Err(format!("invalid boolean value: {other}")),
     }
 }

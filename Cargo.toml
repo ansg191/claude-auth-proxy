@@ -21,6 +21,7 @@ edition = "2024"
 [dependencies]
 axum = "0.8.8"
 bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
 claude-auth-providers = { version = "0.1.0", path = "claude-auth-providers" }
 claude-auth-transform = { version = "0.1.0", path = "claude-auth-transform" }
 http = "1.4.0"

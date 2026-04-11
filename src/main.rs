@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use clap::{Parser, Subcommand};
 use claude_auth_providers::{AnyAuthProvider, ClaudeAuthProvider};
 use claude_auth_transform::{transform_request, transform_response};
 use http_body_util::BodyExt;
@@ -30,12 +31,35 @@ struct ServerState {
     config: ServerConfig,
 }
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "claude-auth-proxy",
+    version,
+    about,
+    arg_required_else_help = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Start the proxy server.
+    Run(ServerConfig),
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let config = ServerConfig::from_env();
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Run(config) => run(config).await,
+    }
+}
 
+async fn run(config: ServerConfig) {
     tracing::info!(
         host = %config.host,
         port = config.port,
