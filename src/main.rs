@@ -34,7 +34,7 @@ struct ServerState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let config = ServerConfig::from_env().unwrap();
+    let config = ServerConfig::from_env();
 
     tracing::info!(
         host = %config.host,
@@ -148,7 +148,7 @@ async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -
     let body = Bytes::from(body);
     let res = execute_with_retry(&state, parts, body).await;
 
-    // Convert reqwest::Response → http::Response with a streaming body
+    // Convert reqwest::Response -> http::Response with a streaming body
     let status = res.status();
     let headers = res.headers().clone();
     let stream = res.bytes_stream();

@@ -22,7 +22,7 @@ where
     })
 }
 
-/// Strips `"name": "mcp_<tool>"` → `"name": "<tool>"` from a byte slice.
+/// Strips `"name": "mcp_<tool>"` -> `"name": "<tool>"` from a byte slice.
 fn strip_tool_prefix(input: &[u8]) -> Bytes {
     let text = String::from_utf8_lossy(input);
     let result = TOOL_PREFIX_RE.replace_all(&text, r#""name": "$1""#);
