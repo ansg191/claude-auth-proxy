@@ -8,6 +8,7 @@ members = [
 [workspace.lints.clippy]
 nursery = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+significant_drop_tightening = "allow"
 
 [lints]
 workspace = true
