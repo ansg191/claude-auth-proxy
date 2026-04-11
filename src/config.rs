@@ -72,7 +72,7 @@ pub struct ServerConfig {
 fn parse_duration_secs(s: &str) -> Result<Duration, String> {
     s.parse::<u64>()
         .map(Duration::from_secs)
-        .map_err(|e| format!("invalid seconds value: {e}"))
+        .map_err(|e| format!("invalid seconds value '{s}': {e}"))
 }
 
 fn parse_bool_flag(s: &str) -> Result<bool, String> {
