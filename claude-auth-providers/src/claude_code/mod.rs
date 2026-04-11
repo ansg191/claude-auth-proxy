@@ -22,6 +22,7 @@ impl Default for ClaudeCodeAuthProvider {
 }
 
 impl ClaudeCodeAuthProvider {
+    #[must_use]
     pub fn new() -> Self {
         let this = Self {
             creds: RwLock::new(Vec::new()),

@@ -107,9 +107,9 @@ async fn refresh_cli(auth: &ClaudeCodeAuthProvider) -> Result<ClaudeCredential, 
         if status.success() {
             // After refreshing via CLI, we need to reload credentials from the keychain
             auth.reload();
-            return Ok(auth.get_active_credential().ok_or_else(|| {
+            return auth.get_active_credential().ok_or_else(|| {
                 Error::Refresh("Failed to get active credential after CLI refresh".into())
-            })?);
+            });
         }
 
         info!(%status, "CLI failed to refresh access token, retrying");
