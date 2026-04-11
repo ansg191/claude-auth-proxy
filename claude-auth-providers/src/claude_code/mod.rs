@@ -66,6 +66,6 @@ impl ClaudeAuthProvider for ClaudeCodeAuthProvider {
     }
 
     fn has_credentials(&self) -> bool {
-        !self.creds.is_empty()
+        !self.creds.read().expect("Poisoned Lock").is_empty()
     }
 }
