@@ -28,15 +28,17 @@ pub async fn refresh_access_token(
         return Ok(creds);
     }
 
-    // First try refreshing via the API
-    let result = refresh_oauth(&creds.refresh_token).await;
-    if let Ok(cred) = result {
-        // Replacing the old credential with the new one
-        let mut creds_guard = auth.creds.write().expect("Poisoned Lock");
-        *creds_guard
-            .get_mut(auth.active)
-            .expect("Active credential index out of bounds") = cred.clone();
-        return Ok(cred);
+    // First try refreshing via the API (only if we have a refresh token)
+    if let Some(refresh_token) = creds.refresh_token.as_deref() {
+        let result = refresh_oauth(refresh_token).await;
+        if let Ok(cred) = result {
+            // Replacing the old credential with the new one
+            let mut creds_guard = auth.creds.write().expect("Poisoned Lock");
+            *creds_guard
+                .get_mut(auth.active)
+                .expect("Active credential index out of bounds") = cred.clone();
+            return Ok(cred);
+        }
     }
 
     // If that fails, try refreshing via the CLI
@@ -83,7 +85,7 @@ async fn refresh_oauth(refresh_token: &str) -> Result<ClaudeCredential, Error> {
 
     Ok(ClaudeCredential {
         access_token: response.access_token,
-        refresh_token: response.refresh_token.unwrap_or_default(),
+        refresh_token: response.refresh_token,
         expires_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("System time before UNIX EPOCH")

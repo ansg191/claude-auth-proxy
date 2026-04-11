@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
-use claude_auth_providers::{ClaudeAuthProvider, claude_code::ClaudeCodeAuthProvider};
+use claude_auth_providers::{AnyAuthProvider, ClaudeAuthProvider};
 use claude_auth_transform::{transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
@@ -25,7 +25,7 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 struct ServerState {
-    auth: ClaudeCodeAuthProvider,
+    auth: AnyAuthProvider,
     client: Client,
     config: ServerConfig,
 }
@@ -50,7 +50,7 @@ async fn main() {
     let host = config.host;
     let port = config.port;
     let state = Arc::new(ServerState {
-        auth: ClaudeCodeAuthProvider::new(),
+        auth: AnyAuthProvider::from_env(),
         client: Client::builder()
             .connect_timeout(config.connect_timeout)
             .read_timeout(config.read_timeout)

@@ -6,7 +6,8 @@ use tracing::{debug, trace};
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeCredential {
     pub access_token: String,
-    pub refresh_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
     pub expires_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription_type: Option<String>,
