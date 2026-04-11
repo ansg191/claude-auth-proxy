@@ -1,10 +1,6 @@
 mod config;
 
-use std::{
-    env,
-    sync::{Arc, LazyLock},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -22,45 +18,44 @@ use tracing::{debug, info};
 
 use crate::config::ServerConfig;
 
-static CONNECT_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
-    env::var("PROXY_CONNECT_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map_or(Duration::from_secs(10), Duration::from_secs)
-});
-
-static READ_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
-    env::var("PROXY_READ_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map_or(Duration::from_secs(600), Duration::from_secs)
-});
+/// Upper bound on honoring a `Retry-After` response header. Protects against a
+/// misbehaving upstream asking the proxy to stall for hours.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 struct ServerState {
     auth: ClaudeCodeAuthProvider,
     client: Client,
+    config: ServerConfig,
 }
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let cfg = ServerConfig::from_env().unwrap();
+    let config = ServerConfig::from_env().unwrap();
 
     tracing::info!(
-        connect_timeout = ?*CONNECT_TIMEOUT,
-        read_timeout = ?*READ_TIMEOUT,
-        "Proxy timeout configuration"
+        host = %config.host,
+        port = config.port,
+        connect_timeout = ?config.connect_timeout,
+        read_timeout = ?config.read_timeout,
+        max_retries = config.max_retries,
+        retry_on_5xx = config.retry_on_5xx,
+        max_5xx_retries = config.max_5xx_retries,
+        "Proxy configuration"
     );
 
+    let host = config.host;
+    let port = config.port;
     let state = Arc::new(ServerState {
         auth: ClaudeCodeAuthProvider::new(),
         client: Client::builder()
-            .connect_timeout(*CONNECT_TIMEOUT)
-            .read_timeout(*READ_TIMEOUT)
+            .connect_timeout(config.connect_timeout)
+            .read_timeout(config.read_timeout)
             .build()
             .expect("failed to build HTTP client"),
+        config,
     });
 
     let app = Router::new()
@@ -68,10 +63,8 @@ async fn main() {
         .route("/ready", axum::routing::get(ready_handler))
         .route("/v1/{*rest}", axum::routing::any(messages_handler))
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind((cfg.host, cfg.port))
-        .await
-        .unwrap();
-    info!("Listening on port 3000");
+    let listener = tokio::net::TcpListener::bind((host, port)).await.unwrap();
+    info!("Listening on {host}:{port}");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -146,10 +139,10 @@ async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -
 
     let req = transform_request(req, &token).unwrap();
 
-    debug!("Forwarding request: {} {}", req.method(), req.uri());
-    let req = reqwest::Request::try_from(req).unwrap();
+    let (parts, body) = req.into_parts();
+    debug!("Forwarding request: {} {}", parts.method, parts.uri);
 
-    let res = state.client.execute(req).await.unwrap();
+    let res = execute_with_retry(&state, parts, body).await;
 
     // Convert reqwest::Response → http::Response with a streaming body
     let status = res.status();
@@ -163,4 +156,260 @@ async fn messages_handler(State(state): State<Arc<ServerState>>, req: Request) -
 
     // Wrap through ClaudeBody to strip tool prefixes from SSE events
     transform_response(response).map(Body::new)
+}
+
+/// Execute the upstream request with retries for transient failures.
+///
+/// Retries on:
+/// - 429 (rate limited) and 529 (overloaded): up to `config.max_retries` attempts
+/// - Other 5xx: up to `config.max_5xx_retries` attempts, if `config.retry_on_5xx`
+/// - Network timeouts / connect errors: up to `config.max_retries` attempts
+///
+/// Panics on non-retryable network errors or when retries are exhausted on an
+/// error, matching the existing `.unwrap()` behavior at this call site.
+async fn execute_with_retry(
+    state: &ServerState,
+    parts: http::request::Parts,
+    body: Vec<u8>,
+) -> reqwest::Response {
+    let mut attempt: u32 = 0;
+    loop {
+        let http_req = http::Request::from_parts(parts.clone(), body.clone());
+        let reqwest_req = reqwest::Request::try_from(http_req).unwrap();
+
+        match state.client.execute(reqwest_req).await {
+            Ok(res) => {
+                if let Some(delay) = retry_delay(
+                    res.status(),
+                    attempt,
+                    res.headers(),
+                    state.config.max_retries,
+                    state.config.retry_on_5xx,
+                    state.config.max_5xx_retries,
+                ) {
+                    debug!(
+                        status = res.status().as_u16(),
+                        attempt,
+                        delay_secs = delay.as_secs(),
+                        "Retryable upstream status, retrying after delay"
+                    );
+                    // Drain the response body so reqwest can return the
+                    // connection to its pool before we sleep.
+                    let _ = res.bytes().await;
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                return res;
+            }
+            Err(e) if (e.is_timeout() || e.is_connect()) && attempt < state.config.max_retries => {
+                let delay = Duration::from_secs(u64::from(attempt + 1) * 2);
+                debug!(
+                    error = %e,
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    "Transient network error, retrying after delay"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+            Err(e) => panic!("upstream request failed: {e}"),
+        }
+    }
+}
+
+/// Compute the retry delay for a response, or `None` if the response should be
+/// returned to the caller as-is.
+///
+/// - 429 and 529 are retried up to `max_retries` attempts.
+/// - Other 5xx are retried up to `max_5xx_retries` attempts when `retry_on_5xx`
+///   is enabled.
+/// - When the `Retry-After` header is present (integer seconds), it is
+///   honored, capped at [`MAX_RETRY_AFTER`].
+/// - Otherwise falls back to `(attempt + 1) * 2` seconds of linear backoff.
+fn retry_delay(
+    status: StatusCode,
+    attempt: u32,
+    headers: &reqwest::header::HeaderMap,
+    max_retries: u32,
+    retry_on_5xx: bool,
+    max_5xx_retries: u32,
+) -> Option<Duration> {
+    let code = status.as_u16();
+    let is_rate_limited = code == 429 || code == 529;
+    let is_other_5xx = !is_rate_limited && status.is_server_error();
+
+    let budget = if is_rate_limited {
+        max_retries
+    } else if is_other_5xx && retry_on_5xx {
+        max_5xx_retries
+    } else {
+        return None;
+    };
+
+    // `attempt` is 0-indexed; allow `attempt < budget - 1` retries after the
+    // initial call, i.e. a budget of 3 means up to 3 total attempts.
+    if attempt + 1 >= budget {
+        return None;
+    }
+
+    let header_delay = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .map(|d| d.min(MAX_RETRY_AFTER));
+
+    Some(header_delay.unwrap_or_else(|| Duration::from_secs(u64::from(attempt + 1) * 2)))
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+    use super::*;
+
+    fn empty_headers() -> HeaderMap {
+        HeaderMap::new()
+    }
+
+    fn headers_with_retry_after(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(RETRY_AFTER, HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    #[test]
+    fn retry_delay_429_first_attempt_uses_backoff() {
+        let delay = retry_delay(
+            StatusCode::TOO_MANY_REQUESTS,
+            0,
+            &empty_headers(),
+            3,
+            false,
+            1,
+        );
+        assert_eq!(delay, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn retry_delay_529_first_attempt_uses_backoff() {
+        let status = StatusCode::from_u16(529).unwrap();
+        let delay = retry_delay(status, 0, &empty_headers(), 3, false, 1);
+        assert_eq!(delay, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn retry_delay_respects_retry_after_header() {
+        let headers = headers_with_retry_after("5");
+        let delay = retry_delay(StatusCode::TOO_MANY_REQUESTS, 0, &headers, 3, false, 1);
+        assert_eq!(delay, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn retry_delay_caps_retry_after_at_max() {
+        let headers = headers_with_retry_after("9999");
+        let delay = retry_delay(StatusCode::TOO_MANY_REQUESTS, 0, &headers, 3, false, 1);
+        assert_eq!(delay, Some(MAX_RETRY_AFTER));
+    }
+
+    #[test]
+    fn retry_delay_ignores_unparseable_retry_after() {
+        let headers = headers_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT");
+        let delay = retry_delay(StatusCode::TOO_MANY_REQUESTS, 0, &headers, 3, false, 1);
+        // Falls back to exponential backoff
+        assert_eq!(delay, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn retry_delay_exponential_backoff_progression() {
+        let headers = empty_headers();
+        assert_eq!(
+            retry_delay(StatusCode::TOO_MANY_REQUESTS, 0, &headers, 5, false, 1),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            retry_delay(StatusCode::TOO_MANY_REQUESTS, 1, &headers, 5, false, 1),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(
+            retry_delay(StatusCode::TOO_MANY_REQUESTS, 2, &headers, 5, false, 1),
+            Some(Duration::from_secs(6))
+        );
+    }
+
+    #[test]
+    fn retry_delay_exhausted_returns_none() {
+        // budget = 3 means 3 total attempts (attempts 0, 1, 2). After attempt 2,
+        // we should not retry again.
+        let delay = retry_delay(
+            StatusCode::TOO_MANY_REQUESTS,
+            2,
+            &empty_headers(),
+            3,
+            false,
+            1,
+        );
+        assert_eq!(delay, None);
+    }
+
+    #[test]
+    fn retry_delay_200_returns_none() {
+        let delay = retry_delay(StatusCode::OK, 0, &empty_headers(), 3, true, 3);
+        assert_eq!(delay, None);
+    }
+
+    #[test]
+    fn retry_delay_400_returns_none() {
+        let delay = retry_delay(StatusCode::BAD_REQUEST, 0, &empty_headers(), 3, true, 3);
+        assert_eq!(delay, None);
+    }
+
+    #[test]
+    fn retry_delay_500_not_retried_when_disabled() {
+        let delay = retry_delay(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            0,
+            &empty_headers(),
+            3,
+            false,
+            1,
+        );
+        assert_eq!(delay, None);
+    }
+
+    #[test]
+    fn retry_delay_500_retried_when_enabled() {
+        let delay = retry_delay(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            0,
+            &empty_headers(),
+            3,
+            true,
+            2,
+        );
+        assert_eq!(delay, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn retry_delay_500_exhausts_5xx_budget() {
+        // 5xx budget = 2 means 2 total attempts. After attempt 1, no more retries.
+        let delay = retry_delay(StatusCode::BAD_GATEWAY, 1, &empty_headers(), 3, true, 2);
+        assert_eq!(delay, None);
+    }
+
+    #[test]
+    fn retry_delay_zero_budget_returns_none() {
+        // A budget of 0 means no attempts at all - but the initial call already
+        // happened, so we should just not retry.
+        let delay = retry_delay(
+            StatusCode::TOO_MANY_REQUESTS,
+            0,
+            &empty_headers(),
+            0,
+            false,
+            0,
+        );
+        assert_eq!(delay, None);
+    }
 }
