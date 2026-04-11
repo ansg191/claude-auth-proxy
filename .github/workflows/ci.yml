@@ -17,22 +17,28 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Check for non-ASCII characters
         run: |
-          # Find non-ASCII characters in source files
-          # Uses LC_ALL=C grep to avoid locale issues with character classes
           NON_ASCII=$(find . \
+            \( -path './target' -o -path './.git' \) -prune -o \
             -type f \( -name '*.rs' -o -name '*.md' -o -name '*.toml' -o -name '*.yml' -o -name '*.yaml' -o -name '*.json' -o -name '*.sh' \) \
-            -not -path './target/*' \
-            -not -path './.git/*' \
             -print0 \
-            | xargs -0 LC_ALL=C grep -Pn '[^\x00-\x7F]' 2>/dev/null) || true
+            | LC_ALL=C xargs -0 -r grep -Pn '[^\x00-\x7F]' 2>/dev/null) || true
 
           if [ -n "$NON_ASCII" ]; then
-            echo "::error::Non-ASCII characters found in source files:"
-            echo "$NON_ASCII"
-            echo ""
-            echo "Common offenders: smart quotes, em dashes, curly apostrophes, unicode symbols."
-            echo "Replace them with ASCII equivalents."
-            exit 1
+            FOUND=0
+            while IFS= read -r match; do
+              file="${match%%:*}"
+              rest="${match#*:}"
+              line="${rest%%:*}"
+              echo "::error file=${file},line=${line}::Non-ASCII character found"
+              FOUND=1
+            done <<< "$NON_ASCII"
+
+            if [ "$FOUND" -eq 1 ]; then
+              echo ""
+              echo "Common offenders: smart quotes, em dashes, curly apostrophes, unicode symbols."
+              echo "Replace them with ASCII equivalents."
+              exit 1
+            fi
           fi
 
           echo "All source files are ASCII-clean."
