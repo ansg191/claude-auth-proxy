@@ -46,4 +46,8 @@ impl ClaudeAuthProvider for ClaudeCodeAuthProvider {
             .map(|cred| cred.access_token.clone())
             .ok_or(Error::NoCredentials)
     }
+
+    fn has_credentials(&self) -> bool {
+        !self.creds.is_empty()
+    }
 }
