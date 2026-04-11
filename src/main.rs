@@ -1,4 +1,5 @@
 mod config;
+mod install;
 
 use std::{sync::Arc, time::Duration};
 
@@ -16,7 +17,7 @@ use claude_auth_transform::{transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
 use tokio::signal;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::config::ServerConfig;
 
@@ -47,15 +48,36 @@ struct Cli {
 enum Command {
     /// Start the proxy server.
     Run(ServerConfig),
+    /// Install the proxy as a macOS launchd user agent.
+    Install(install::InstallArgs),
+    /// Uninstall the macOS launchd user agent.
+    Uninstall,
 }
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let cli = Cli::parse();
     match cli.command {
         Command::Run(config) => run(config).await,
+        Command::Install(args) => {
+            if let Err(e) = install::install(args) {
+                error!(error = %e, "install failed");
+                std::process::exit(1);
+            }
+        }
+        Command::Uninstall => {
+            if let Err(e) = install::uninstall() {
+                error!(error = %e, "uninstall failed");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
