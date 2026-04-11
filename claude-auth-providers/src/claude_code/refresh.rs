@@ -31,10 +31,10 @@ pub async fn refresh_access_token(
     let result = refresh_oauth(&creds.refresh_token).await;
     if let Ok(cred) = result {
         // Replacing the old credential with the new one
-        auth.creds
-            .write()
-            .expect("Poisoned Lock")
-            .insert(auth.active, cred.clone());
+        let mut creds_guard = auth.creds.write().expect("Poisoned Lock");
+        *creds_guard
+            .get_mut(auth.active)
+            .expect("Active credential index out of bounds") = cred.clone();
         return Ok(cred);
     }
 
