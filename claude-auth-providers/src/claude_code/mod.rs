@@ -1,10 +1,12 @@
-use std::sync::RwLock;
+use std::{collections::HashSet, sync::RwLock};
 
+#[cfg(target_os = "macos")]
 use tracing::error;
 
 use crate::{ClaudeAuthProvider, Error, claude_code::credential::ClaudeCredential};
 
 mod credential;
+mod credentials_file;
 #[cfg(target_os = "macos")]
 mod keychain;
 mod refresh;
@@ -35,6 +37,7 @@ impl ClaudeCodeAuthProvider {
     fn reload(&self) {
         let mut creds = Vec::new();
 
+        // Source 1: macOS Keychain (macOS only)
         #[cfg(target_os = "macos")]
         {
             let res = keychain::get_credentials();
@@ -45,6 +48,14 @@ impl ClaudeCodeAuthProvider {
                 }
             }
         }
+
+        // Source 2: ~/.claude/.credentials.json (cross-platform fallback)
+        creds.extend(credentials_file::get_credentials());
+
+        // Deduplicate by access_token — keychain and file may contain the
+        // same credential on macOS (Claude Code mirrors to both locations).
+        let mut seen = HashSet::new();
+        creds.retain(|c| seen.insert(c.access_token.clone()));
 
         *self.creds.write().expect("Poisoned Lock") = creds;
     }
