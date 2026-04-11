@@ -49,19 +49,38 @@ fn parse_duration_secs(var: &str, default_secs: u64) -> Duration {
 }
 
 /// Read the environment variable `var`, parse it as `T`, and return the
-/// parsed value. If the variable is unset or cannot be parsed, return
-/// `default`.
+/// parsed value. If the variable is unset, return `default` silently. If it
+/// is set but cannot be parsed, log a warning and return `default` so a
+/// typo in a critical binding like `CLAUDE_PROXY_HOST` is visible in the
+/// startup logs rather than silently falling back.
 fn parse_or_default<T: FromStr>(var: &str, default: T) -> T {
-    env::var(var)
-        .ok()
-        .and_then(|v| v.parse::<T>().ok())
-        .unwrap_or(default)
+    let Ok(raw) = env::var(var) else {
+        return default;
+    };
+    raw.parse::<T>().unwrap_or_else(|_| {
+        tracing::warn!(
+            var,
+            value = %raw,
+            "Environment variable set but could not be parsed, falling back to default"
+        );
+        default
+    })
 }
 
 fn parse_bool(var: &str, default: bool) -> bool {
-    env::var(var).ok().map_or(default, |v| match v.trim() {
+    let Ok(raw) = env::var(var) else {
+        return default;
+    };
+    match raw.trim() {
         "1" | "true" | "TRUE" | "True" | "yes" | "YES" => true,
         "0" | "false" | "FALSE" | "False" | "no" | "NO" => false,
-        _ => default,
-    })
+        _ => {
+            tracing::warn!(
+                var,
+                value = %raw,
+                "Environment variable set but could not be parsed as a boolean, falling back to default"
+            );
+            default
+        }
+    }
 }
