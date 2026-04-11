@@ -14,4 +14,12 @@ pub enum Error {
     #[cfg(target_os = "macos")]
     #[error("Failed to read credentials from keychain: {0}")]
     Keychain(#[from] security_framework::base::Error),
+    #[error("Failed to refresh access token: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("Failed to parse response: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error("Failed to refresh access token: {0}")]
+    Refresh(String),
+    #[error("Spawn Failed: {0}")]
+    Spawn(#[from] std::io::Error),
 }
