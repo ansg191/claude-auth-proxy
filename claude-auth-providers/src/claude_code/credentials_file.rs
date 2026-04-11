@@ -118,7 +118,14 @@ mod tests {
 
     #[test]
     fn returns_empty_for_missing_file() {
-        let path = PathBuf::from("/nonexistent/path/credentials.json");
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "claude-auth-proxy-test-missing-{}.json",
+            std::process::id(),
+        ));
+        // Guarantee the path does not exist (cleans up any prior run).
+        let _ = std::fs::remove_file(&path);
+        assert!(!path.exists());
         assert!(load_from(&path).is_empty());
     }
 
