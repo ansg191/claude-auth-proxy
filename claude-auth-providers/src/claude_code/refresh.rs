@@ -13,6 +13,7 @@ const OAUTH_TOKEN_URL: &str = "https://claude.ai/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 const EXPIRE_BUFFER: Duration = Duration::from_mins(60);
+const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub async fn refresh_access_token(
     auth: &ClaudeCodeAuthProvider,
@@ -97,12 +98,24 @@ async fn refresh_cli(auth: &ClaudeCodeAuthProvider) -> Result<ClaudeCredential, 
 
     for i in 0..MAX_ATTEMPTS {
         debug!(attempt = i, "Attempting to refresh access token using CLI");
-        let status = Command::new("claude")
+        let mut child = Command::new("claude")
             .args(["-p", ".", "--model", "haiku"])
             .env("TERM", "dumb")
             .stdin(std::process::Stdio::null())
-            .status()
-            .await?;
+            .spawn()?;
+
+        let status = if let Ok(status) = tokio::time::timeout(CLI_TIMEOUT, child.wait()).await {
+            status?
+        } else {
+            error!(
+                attempt = i,
+                timeout_secs = CLI_TIMEOUT.as_secs(),
+                "CLI refresh timed out"
+            );
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            continue;
+        };
 
         if status.success() {
             // After refreshing via CLI, we need to reload credentials from the keychain
