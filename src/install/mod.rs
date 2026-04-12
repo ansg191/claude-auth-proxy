@@ -168,10 +168,18 @@ mod platform {
         }
 
         let claude_bin_dir = match which::which("claude") {
-            Ok(path) => path.parent().map(|dir| {
-                let dir = dir.to_string_lossy().into_owned();
-                info!(path = %dir, "discovered claude binary directory");
-                dir
+            Ok(path) => path.parent().and_then(|dir| {
+                let dir = dir.to_str().map(ToOwned::to_owned);
+                dir.map_or_else(
+                    || {
+                        warn!("claude code path contains invalid characters");
+                        None
+                    },
+                    |dir| {
+                        info!(path = %dir, "discovered claude binary directory");
+                        Some(dir)
+                    },
+                )
             }),
             Err(e) => {
                 warn!(
