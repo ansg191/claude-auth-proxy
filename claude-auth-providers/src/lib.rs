@@ -30,7 +30,7 @@ pub enum Error {
     FailedOAuthResponse(#[source] serde_json::Error),
     #[error("failed to refresh access token: {0}")]
     Refresh(String),
-    #[error("claude codesSpawn rrror: {0}")]
+    #[error("claude code spawn error: {0}")]
     ClaudeCodeSpawn(#[source] std::io::Error),
     #[cfg(target_os = "macos")]
     #[error("failed to read credentials from keychain: {0}")]
