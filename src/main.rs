@@ -14,7 +14,7 @@ use axum::{
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use claude_auth_providers::{AnyAuthProvider, ClaudeAuthProvider};
-use claude_auth_transform::{transform_request, transform_response};
+use claude_auth_transform::{TransformContext, transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
 use tokio::signal;
@@ -31,6 +31,7 @@ struct ServerState {
     auth: AnyAuthProvider,
     client: Client,
     config: ServerConfig,
+    transform: TransformContext,
 }
 
 #[derive(Parser, Debug)]
@@ -85,8 +86,23 @@ async fn run(config: ServerConfig) -> std::io::Result<()> {
         "Proxy configuration"
     );
 
+    let transform_config = config.transform.clone().into_transform_config();
+
+    tracing::info!(
+        cc_version = %transform_config.cc_version,
+        entrypoint = %transform_config.entrypoint,
+        user_agent_override = ?transform_config.user_agent_override,
+        base_betas = ?transform_config.base_betas,
+        "Transform configuration"
+    );
+    tracing::debug!(
+        session_id = %transform_config.session_id,
+        "Transform session"
+    );
+
     let host = config.host;
     let port = config.port;
+    let transform = TransformContext::new(transform_config);
     let state = Arc::new(ServerState {
         auth: AnyAuthProvider::from_env(),
         client: Client::builder()
@@ -95,6 +111,7 @@ async fn run(config: ServerConfig) -> std::io::Result<()> {
             .build()
             .expect("failed to build HTTP client"),
         config,
+        transform,
     });
 
     let app = Router::new()
@@ -185,6 +202,7 @@ async fn messages_handler(
     let req = transform_request(
         http::Request::from_parts(parts.clone(), collected.clone()),
         &token,
+        &state.transform,
     )?;
     let (tx_parts, tx_body) = req.into_parts();
     debug!("Forwarding request: {} {}", tx_parts.method, tx_parts.uri);
@@ -245,7 +263,11 @@ async fn handle_401_retry(
 
     info!("Credentials refreshed after 401, retrying request with new token");
 
-    let req = transform_request(http::Request::from_parts(parts, body), &new_token)?;
+    let req = transform_request(
+        http::Request::from_parts(parts, body),
+        &new_token,
+        &state.transform,
+    )?;
     let (tx_parts, tx_body) = req.into_parts();
     let tx_body = Bytes::from(tx_body);
 
