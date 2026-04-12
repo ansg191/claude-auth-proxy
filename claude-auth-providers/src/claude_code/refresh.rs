@@ -73,11 +73,14 @@ async fn refresh_oauth(refresh_token: &str) -> Result<ClaudeCredential, Error> {
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body.into_owned())
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+        .map_err(Error::FailedOAuthRequest)?
+        .error_for_status()
+        .map_err(Error::FailedOAuthRequest)?;
 
-    let body = res.text().await?;
-    let response: OAuthResponse = serde_json::from_str(&body)?;
+    let body = res.text().await.map_err(Error::FailedOAuthRequest)?;
+    let response: OAuthResponse =
+        serde_json::from_str(&body).map_err(Error::FailedOAuthResponse)?;
 
     if let Some(error) = response.error {
         error!("Failed to refresh access token: {}", error);
@@ -105,10 +108,11 @@ async fn refresh_cli(auth: &ClaudeCodeAuthProvider) -> Result<ClaudeCredential, 
             .args(["-p", ".", "--model", "haiku"])
             .env("TERM", "dumb")
             .stdin(std::process::Stdio::null())
-            .spawn()?;
+            .spawn()
+            .map_err(Error::ClaudeCodeSpawn)?;
 
         let status = if let Ok(status) = tokio::time::timeout(CLI_TIMEOUT, child.wait()).await {
-            status?
+            status.map_err(Error::ClaudeCodeSpawn)?
         } else {
             error!(
                 attempt = i,

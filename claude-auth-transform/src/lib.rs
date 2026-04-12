@@ -80,23 +80,28 @@ impl std::fmt::Debug for TransformContext {
 impl TransformContext {
     /// Build a new context, pre-computing the user-agent header value.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the resolved user-agent string is not valid ASCII.
-    #[must_use]
-    pub fn new(config: TransformConfig) -> Self {
-        let user_agent = config.user_agent_override.as_ref().map_or_else(
-            || {
-                HeaderValue::from_str(&format!("claude-cli/{} (external, cli)", config.cc_version))
-                    .expect("User agent must be valid ascii")
-            },
-            |ua| HeaderValue::from_str(ua).expect("User agent must be valid ascii"),
-        );
-        Self {
+    /// Errors if the resolved user-agent string is not valid ASCII.
+    pub fn new(config: TransformConfig) -> Result<Self, Error> {
+        let user_agent = config
+            .user_agent_override
+            .as_ref()
+            .map_or_else(
+                || {
+                    HeaderValue::from_str(&format!(
+                        "claude-cli/{} (external, cli)",
+                        config.cc_version
+                    ))
+                },
+                |ua| HeaderValue::from_str(ua),
+            )
+            .map_err(Error::InvalidUserAgent)?;
+        Ok(Self {
             beta_manager: BetaManager::new(),
             config,
             user_agent,
-        }
+        })
     }
 }
 
@@ -129,7 +134,7 @@ where
         access_token,
         model_id.as_deref().unwrap_or(""),
         ctx,
-    );
+    )?;
 
     let body = transform_body(body.as_ref(), &ctx.config)?;
 
@@ -144,7 +149,7 @@ fn build_request_headers(
     access_token: &str,
     model_id: &str,
     ctx: &TransformContext,
-) {
+) -> Result<(), Error> {
     let model_betas = ctx.beta_manager.get_model_betas(model_id, &ctx.config);
     trace!(?model_betas, model_id, "Model betas");
     let incoming_beta = headers
@@ -164,11 +169,12 @@ fn build_request_headers(
 
     debug!(?merged_betas, model_id, "Computed betas");
     let merged_betas =
-        HeaderValue::from_str(&merged_betas.join(",")).expect("Betas should all be valid ascii");
+        HeaderValue::from_str(&merged_betas.join(",")).map_err(Error::InvalidBetas)?;
 
     headers.insert(
         "Authorization",
-        HeaderValue::from_str(&format!("Bearer {access_token}")).unwrap(),
+        HeaderValue::from_str(&format!("Bearer {access_token}"))
+            .map_err(Error::InvalidAccessToken)?,
     );
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     headers.insert("anthropic-beta", merged_betas);
@@ -176,11 +182,12 @@ fn build_request_headers(
     headers.insert("user-agent", ctx.user_agent.clone());
     headers.insert(
         "x-client-request-id",
-        HeaderValue::from_str(&Uuid::new_v4().to_string()).unwrap(),
+        HeaderValue::from_str(&Uuid::new_v4().to_string()).expect("UUID should be valid ascii"),
     );
     headers.insert(
         "X-Claude-Code-Session-Id",
-        HeaderValue::from_str(&ctx.config.session_id).unwrap(),
+        HeaderValue::from_str(&ctx.config.session_id).map_err(Error::InvalidSessionId)?,
     );
     headers.remove("x-api-key");
+    Ok(())
 }
