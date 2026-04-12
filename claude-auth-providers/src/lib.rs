@@ -32,6 +32,7 @@ pub enum Error {
     Refresh(String),
     #[error("Claude Code Spawn Error: {0}")]
     ClaudeCodeSpawn(#[source] std::io::Error),
+    #[cfg(target_os = "macos")]
     #[error("Failed to read credentials from keychain: {0}")]
     Keychain(#[from] security_framework::base::Error),
 }
