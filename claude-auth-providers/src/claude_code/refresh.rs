@@ -18,13 +18,14 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(60);
 pub async fn refresh_access_token(
     auth: &ClaudeCodeAuthProvider,
     creds: ClaudeCredential,
+    force: bool,
 ) -> Result<ClaudeCredential, Error> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("System time before UNIX EPOCH")
         .as_secs();
 
-    if now + EXPIRE_BUFFER.as_secs() < creds.expires_at {
+    if !force && now + EXPIRE_BUFFER.as_secs() < creds.expires_at {
         return Ok(creds);
     }
 

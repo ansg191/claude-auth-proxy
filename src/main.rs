@@ -18,7 +18,7 @@ use claude_auth_transform::{transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
 use tokio::signal;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{config::ServerConfig, error::AppError};
 
@@ -179,19 +179,27 @@ async fn messages_handler(
         .await
         .map_err(AppError::BodyCollect)?
         .to_bytes();
-    let req = http::Request::from_parts(parts, collected);
 
     let token = state.auth.get_access_token().await?;
 
-    let req = transform_request(req, &token)?;
-
-    let (parts, body) = req.into_parts();
-    debug!("Forwarding request: {} {}", parts.method, parts.uri);
+    let req = transform_request(
+        http::Request::from_parts(parts.clone(), collected.clone()),
+        &token,
+    )?;
+    let (tx_parts, tx_body) = req.into_parts();
+    debug!("Forwarding request: {} {}", tx_parts.method, tx_parts.uri);
 
     // Convert the body to `Bytes` so that cloning for retries is cheap
     // (reference-counted) instead of deep-copying the Vec on each attempt.
-    let body = Bytes::from(body);
-    let res = execute_with_retry(&state, parts, body).await?;
+    let tx_body = Bytes::from(tx_body);
+    let res = execute_with_retry(&state, tx_parts, tx_body).await?;
+
+    // On 401, attempt a forced credential refresh and retry once.
+    let res = if res.status() == StatusCode::UNAUTHORIZED {
+        handle_401_retry(&state, &token, parts, collected, res).await?
+    } else {
+        res
+    };
 
     // Convert reqwest::Response -> http::Response with a streaming body
     let status = res.status();
@@ -205,6 +213,69 @@ async fn messages_handler(
 
     // Wrap through ClaudeBody to strip tool prefixes from SSE events
     Ok(transform_response(response).map(Body::new))
+}
+
+/// When upstream returns 401 Unauthorized, attempt a forced credential
+/// refresh and retry the request exactly once with the new token.
+///
+/// If the refreshed token is identical to the original (meaning the
+/// credentials haven't actually changed), or if the refresh itself fails,
+/// the original 401 response is returned to the caller.
+async fn handle_401_retry(
+    state: &ServerState,
+    original_token: &str,
+    parts: http::request::Parts,
+    body: Bytes,
+    original_response: reqwest::Response,
+) -> Result<reqwest::Response, AppError> {
+    debug!("Received 401 from upstream, attempting credential refresh");
+
+    let new_token = match state.auth.force_refresh_token().await {
+        Ok(token) => token,
+        Err(e) => {
+            warn!(error = %e, "Credential refresh failed, returning original 401");
+            return Ok(original_response);
+        }
+    };
+
+    if new_token == original_token {
+        debug!("Refreshed token is identical to original, returning 401 to caller");
+        return Ok(original_response);
+    }
+
+    info!("Credentials refreshed after 401, retrying request with new token");
+
+    let req = transform_request(http::Request::from_parts(parts, body), &new_token)?;
+    let (tx_parts, tx_body) = req.into_parts();
+    let tx_body = Bytes::from(tx_body);
+
+    match execute_with_retry(state, tx_parts, tx_body).await {
+        Ok(retry_response) => {
+            // The retry succeeded; drain the original 401 so the connection
+            // can return to the pool.
+            drain_response(original_response).await;
+            Ok(retry_response)
+        }
+        Err(e) => {
+            warn!(error = %e, "Retry after credential refresh failed, returning original 401");
+            Ok(original_response)
+        }
+    }
+}
+
+/// Drain a response body in a streaming fashion so the underlying connection
+/// can be returned to the pool without buffering in memory.
+async fn drain_response(mut response: reqwest::Response) {
+    loop {
+        match response.chunk().await {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(e) => {
+                debug!(error = %e, "Failed to drain response body, connection may not be reused");
+                break;
+            }
+        }
+    }
 }
 
 /// Execute the upstream request with retries for transient failures.
