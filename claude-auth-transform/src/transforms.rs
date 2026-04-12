@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, trace};
 
 use crate::{
-    TransformConfig, Error,
+    Error, TransformConfig,
     bodies::{Message, MessageBody, MessageContent, SystemEntry},
     config::CONFIG,
     signing::build_billing_header_value,

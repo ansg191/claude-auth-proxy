@@ -17,7 +17,7 @@ use crate::{betas::BetaManager, transforms::transform_body};
 /// Runtime configuration for the transform layer.
 ///
 /// Constructed once at startup from environment variables and defaults.
-/// The transform crate itself never reads `env::var` — the caller is
+/// The transform crate itself never reads `env::var` -- the caller is
 /// responsible for resolving values and passing them in.
 #[derive(Debug, Clone)]
 pub struct TransformConfig {

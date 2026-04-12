@@ -14,7 +14,9 @@ use axum::{
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use claude_auth_providers::{AnyAuthProvider, ClaudeAuthProvider};
-use claude_auth_transform::{TransformConfig, TransformContext, transform_request, transform_response};
+use claude_auth_transform::{
+    TransformConfig, TransformContext, transform_request, transform_response,
+};
 use http_body_util::BodyExt;
 use reqwest::Client;
 use tokio::signal;
