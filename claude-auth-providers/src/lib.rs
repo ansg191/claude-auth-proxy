@@ -5,6 +5,13 @@ use crate::{claude_code::ClaudeCodeAuthProvider, env_var::EnvVarAuthProvider};
 
 pub trait ClaudeAuthProvider {
     fn get_access_token(&self) -> impl Future<Output = Result<String, Error>>;
+    /// Force-refresh credentials, bypassing any expiry cache.
+    ///
+    /// Used when upstream returns 401 to obtain a genuinely new token.
+    /// Default implementation delegates to [`get_access_token`](Self::get_access_token).
+    fn force_refresh_token(&self) -> impl Future<Output = Result<String, Error>> {
+        self.get_access_token()
+    }
     fn has_credentials(&self) -> bool {
         true
     }
@@ -58,6 +65,13 @@ impl ClaudeAuthProvider for AnyAuthProvider {
         match self {
             Self::ClaudeCode(p) => p.get_access_token().await,
             Self::EnvVar(p) => p.get_access_token().await,
+        }
+    }
+
+    async fn force_refresh_token(&self) -> Result<String, Error> {
+        match self {
+            Self::ClaudeCode(p) => p.force_refresh_token().await,
+            Self::EnvVar(p) => p.force_refresh_token().await,
         }
     }
 

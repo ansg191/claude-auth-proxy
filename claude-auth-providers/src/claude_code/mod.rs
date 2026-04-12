@@ -72,7 +72,13 @@ impl ClaudeCodeAuthProvider {
 impl ClaudeAuthProvider for ClaudeCodeAuthProvider {
     async fn get_access_token(&self) -> Result<String, Error> {
         let creds = self.get_active_credential().ok_or(Error::NoCredentials)?;
-        let creds = refresh::refresh_access_token(self, creds).await?;
+        let creds = refresh::refresh_access_token(self, creds, false).await?;
+        Ok(creds.access_token)
+    }
+
+    async fn force_refresh_token(&self) -> Result<String, Error> {
+        let creds = self.get_active_credential().ok_or(Error::NoCredentials)?;
+        let creds = refresh::refresh_access_token(self, creds, true).await?;
         Ok(creds.access_token)
     }
 
