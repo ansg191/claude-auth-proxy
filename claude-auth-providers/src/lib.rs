@@ -22,18 +22,18 @@ pub trait ClaudeAuthProvider {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("No available credentials")]
+    #[error("no available credentials")]
     NoCredentials,
-    #[error("Failed to refresh access token: {0}")]
+    #[error("failed to refresh access token: {0}")]
     FailedOAuthRequest(#[source] reqwest::Error),
-    #[error("Failed to parse oauth response: {0}")]
+    #[error("failed to parse oauth response: {0}")]
     FailedOAuthResponse(#[source] serde_json::Error),
-    #[error("Failed to refresh access token: {0}")]
+    #[error("failed to refresh access token: {0}")]
     Refresh(String),
-    #[error("Claude Code Spawn Error: {0}")]
+    #[error("claude codesSpawn rrror: {0}")]
     ClaudeCodeSpawn(#[source] std::io::Error),
     #[cfg(target_os = "macos")]
-    #[error("Failed to read credentials from keychain: {0}")]
+    #[error("failed to read credentials from keychain: {0}")]
     Keychain(#[from] security_framework::base::Error),
 }
 
