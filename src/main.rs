@@ -14,7 +14,7 @@ use axum::{
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use claude_auth_providers::{AnyAuthProvider, ClaudeAuthProvider};
-use claude_auth_transform::{transform_request, transform_response};
+use claude_auth_transform::{TransformConfig, TransformContext, transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
 use tokio::signal;
@@ -31,6 +31,7 @@ struct ServerState {
     auth: AnyAuthProvider,
     client: Client,
     config: ServerConfig,
+    transform: TransformContext,
 }
 
 #[derive(Parser, Debug)]
@@ -85,6 +86,33 @@ async fn run(config: ServerConfig) -> std::io::Result<()> {
         "Proxy configuration"
     );
 
+    let mut transform_config = TransformConfig::default();
+    if let Ok(v) = std::env::var("ANTHROPIC_CLI_VERSION") {
+        transform_config.cc_version = v;
+    }
+    if let Ok(v) = std::env::var("CLAUDE_CODE_ENTRYPOINT") {
+        transform_config.entrypoint = v;
+    }
+    transform_config.user_agent_override = std::env::var("ANTHROPIC_USER_AGENT").ok();
+    transform_config.beta_flags_override =
+        std::env::var("ANTHROPIC_BETA_FLAGS").ok().map(|flags| {
+            flags
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        });
+
+    tracing::info!(
+        cc_version = %transform_config.cc_version,
+        entrypoint = %transform_config.entrypoint,
+        user_agent_override = ?transform_config.user_agent_override,
+        beta_flags_override = ?transform_config.beta_flags_override,
+        session_id = %transform_config.session_id,
+        "Transform configuration"
+    );
+
     let host = config.host;
     let port = config.port;
     let state = Arc::new(ServerState {
@@ -95,6 +123,7 @@ async fn run(config: ServerConfig) -> std::io::Result<()> {
             .build()
             .expect("failed to build HTTP client"),
         config,
+        transform: TransformContext::new(transform_config),
     });
 
     let app = Router::new()
@@ -185,6 +214,7 @@ async fn messages_handler(
     let req = transform_request(
         http::Request::from_parts(parts.clone(), collected.clone()),
         &token,
+        &state.transform,
     )?;
     let (tx_parts, tx_body) = req.into_parts();
     debug!("Forwarding request: {} {}", tx_parts.method, tx_parts.uri);
@@ -245,7 +275,11 @@ async fn handle_401_retry(
 
     info!("Credentials refreshed after 401, retrying request with new token");
 
-    let req = transform_request(http::Request::from_parts(parts, body), &new_token)?;
+    let req = transform_request(
+        http::Request::from_parts(parts, body),
+        &new_token,
+        &state.transform,
+    )?;
     let (tx_parts, tx_body) = req.into_parts();
     let tx_body = Bytes::from(tx_body);
 

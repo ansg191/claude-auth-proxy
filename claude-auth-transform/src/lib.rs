@@ -6,21 +6,65 @@ mod response;
 mod signing;
 mod transforms;
 
-use std::{env, sync::LazyLock};
-
 pub use error::Error;
 use http::{HeaderMap, HeaderValue};
 pub use response::{ClaudeBody, transform_response};
 use tracing::{debug, trace};
 use uuid::Uuid;
 
-use crate::{betas::BETA_MANAGER, config::CONFIG, transforms::transform_body};
+use crate::{betas::BetaManager, transforms::transform_body};
 
-/// Stable per-process session ID, matching Claude Code's X-Claude-Code-Session-Id
-static SESSION_ID: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().to_string());
+/// Runtime configuration for the transform layer.
+///
+/// Constructed once at startup from environment variables and defaults.
+/// The transform crate itself never reads `env::var` — the caller is
+/// responsible for resolving values and passing them in.
+#[derive(Debug, Clone)]
+pub struct TransformConfig {
+    /// CLI version string (from `ANTHROPIC_CLI_VERSION`, default `ModelConfig.cc_version`).
+    pub cc_version: String,
+    /// Entrypoint identifier (from `CLAUDE_CODE_ENTRYPOINT`, default `"cli"`).
+    pub entrypoint: String,
+    /// Full user-agent override (from `ANTHROPIC_USER_AGENT`). When `None`,
+    /// computed as `"claude-cli/{cc_version} (external, cli)"`.
+    pub user_agent_override: Option<String>,
+    /// Beta flag override (from `ANTHROPIC_BETA_FLAGS`). When `None`, uses
+    /// `ModelConfig.base_betas`. When `Some`, entirely replaces base betas.
+    pub beta_flags_override: Option<Vec<String>>,
+    /// Stable per-process session ID.
+    pub session_id: String,
+}
 
-static ENV_VERSION: LazyLock<Option<String>> =
-    LazyLock::new(|| env::var("ANTHROPIC_CLI_VERSION").ok());
+impl Default for TransformConfig {
+    fn default() -> Self {
+        Self {
+            cc_version: config::CONFIG.cc_version.to_owned(),
+            entrypoint: "cli".to_owned(),
+            user_agent_override: None,
+            beta_flags_override: None,
+            session_id: Uuid::new_v4().to_string(),
+        }
+    }
+}
+
+/// Bundles [`TransformConfig`] with stateful components ([`BetaManager`]).
+///
+/// Created once at startup and shared across requests via `Arc`.
+#[derive(Debug)]
+pub struct TransformContext {
+    pub config: TransformConfig,
+    beta_manager: BetaManager,
+}
+
+impl TransformContext {
+    #[must_use]
+    pub fn new(config: TransformConfig) -> Self {
+        Self {
+            beta_manager: BetaManager::new(),
+            config,
+        }
+    }
+}
 
 /// Transform an anthropic API request into a authenticated Claude API request.
 ///
@@ -28,6 +72,7 @@ static ENV_VERSION: LazyLock<Option<String>> =
 ///
 /// * `request`: The HTTP request to transform
 /// * `access_token`: The access token to use for authentication
+/// * `ctx`: Transform context holding runtime config and beta state
 ///
 /// # Errors
 ///
@@ -35,6 +80,7 @@ static ENV_VERSION: LazyLock<Option<String>> =
 pub fn transform_request<B>(
     request: http::Request<B>,
     access_token: &str,
+    ctx: &TransformContext,
 ) -> Result<http::Request<Vec<u8>>, Error>
 where
     B: AsRef<[u8]>,
@@ -48,9 +94,10 @@ where
         &mut parts.headers,
         access_token,
         model_id.as_deref().unwrap_or(""),
+        ctx,
     );
 
-    let body = transform_body(body.as_ref())?;
+    let body = transform_body(body.as_ref(), &ctx.config)?;
 
     trace!(headers = ?parts.headers, "Transformed Headers");
     trace!(body = %String::from_utf8_lossy(&body).as_ref(), "Transformed Body");
@@ -58,26 +105,43 @@ where
     Ok(http::Request::from_parts(parts, body))
 }
 
-fn build_request_headers(headers: &mut HeaderMap, access_token: &str, model_id: &str) {
-    let model_betas = BETA_MANAGER.get_model_betas(model_id);
+fn build_request_headers(
+    headers: &mut HeaderMap,
+    access_token: &str,
+    model_id: &str,
+    ctx: &TransformContext,
+) {
+    let model_betas = ctx.beta_manager.get_model_betas(model_id, &ctx.config);
     trace!(?model_betas, model_id, "Model betas");
     let incoming_beta = headers
         .get("anthropic-beta")
         .map_or("", |v| v.to_str().unwrap_or(""));
     trace!(?incoming_beta, model_id, "Incoming betas");
-    let merged_betas = model_betas
+    let merged_betas: Vec<String> = model_betas
         .into_iter()
         .chain(
             incoming_beta
                 .split(',')
                 .map(str::trim)
-                .filter(|s| !s.is_empty()),
+                .filter(|s| !s.is_empty())
+                .map(String::from),
         )
-        .collect::<Vec<_>>();
+        .collect();
 
     debug!(?merged_betas, model_id, "Computed betas");
     let merged_betas =
         HeaderValue::from_str(&merged_betas.join(",")).expect("Betas should all be valid ascii");
+
+    let user_agent = ctx.config.user_agent_override.as_ref().map_or_else(
+        || {
+            HeaderValue::from_str(&format!(
+                "claude-cli/{} (external, cli)",
+                ctx.config.cc_version
+            ))
+            .expect("User agent must be valid ascii")
+        },
+        |ua| HeaderValue::from_str(ua).expect("User agent must be valid ascii"),
+    );
 
     headers.insert(
         "Authorization",
@@ -86,24 +150,14 @@ fn build_request_headers(headers: &mut HeaderMap, access_token: &str, model_id: 
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     headers.insert("anthropic-beta", merged_betas);
     headers.insert("x-app", HeaderValue::from_static("cli"));
-    headers.insert("user-agent", get_user_agent());
+    headers.insert("user-agent", user_agent);
     headers.insert(
         "x-client-request-id",
         HeaderValue::from_str(&Uuid::new_v4().to_string()).unwrap(),
     );
     headers.insert(
         "X-Claude-Code-Session-Id",
-        HeaderValue::from_str(&SESSION_ID).unwrap(),
+        HeaderValue::from_str(&ctx.config.session_id).unwrap(),
     );
     headers.remove("x-api-key");
-}
-
-fn get_user_agent() -> HeaderValue {
-    HeaderValue::from_str(&env::var("ANTHROPIC_USER_AGENT").unwrap_or_else(|_| {
-        format!(
-            "claude-cli/{} (external, cli)",
-            ENV_VERSION.as_deref().unwrap_or(CONFIG.cc_version)
-        )
-    }))
-    .expect("User agent must be valid ascii")
 }

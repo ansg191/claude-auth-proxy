@@ -1,32 +1,21 @@
 use std::{
     collections::{HashMap, HashSet},
-    env,
-    sync::{LazyLock, RwLock},
+    sync::RwLock,
 };
 
-use crate::config::CONFIG;
+use crate::{TransformConfig, config::CONFIG};
 
-static ENV_BETA_FLAGS: LazyLock<Option<String>> =
-    LazyLock::new(|| env::var("ANTHROPIC_BETA_FLAGS").ok());
-
-fn get_required_betas() -> Vec<&'static str> {
-    ENV_BETA_FLAGS.as_deref().map_or_else(
-        || Vec::from(CONFIG.base_betas),
-        |flags| {
-            flags
-                .split(',')
-                .map(str::trim)
-                .filter(|x| !x.is_empty())
-                .collect()
-        },
+fn get_required_betas(config: &TransformConfig) -> Vec<String> {
+    config.beta_flags_override.as_ref().map_or_else(
+        || CONFIG.base_betas.iter().map(|s| (*s).to_owned()).collect(),
+        Clone::clone,
     )
 }
 
-pub static BETA_MANAGER: LazyLock<BetaManager> = LazyLock::new(BetaManager::new);
-
+#[derive(Debug)]
 pub struct BetaManager {
     /// Session-level cache of excluded beta flags per model
-    excluded_betas: RwLock<HashMap<String, HashSet<&'static str>>>,
+    excluded_betas: RwLock<HashMap<String, HashSet<String>>>,
 }
 
 impl BetaManager {
@@ -38,15 +27,15 @@ impl BetaManager {
 
     // TODO: add & clear excluded beta methods
 
-    pub fn get_model_betas(&self, model: &str) -> Vec<&'static str> {
-        let mut betas = get_required_betas();
+    pub fn get_model_betas(&self, model: &str, config: &TransformConfig) -> Vec<String> {
+        let mut betas = get_required_betas(config);
 
         // TODO: handle 1m context beta
 
         // Apply per-model overrides (e.g., haiku excludes claude-code-20250219)
         if let Some(override_) = CONFIG.get_model_override(model) {
-            betas.retain(|b| !override_.exclude.contains(b));
-            betas.extend_from_slice(override_.add);
+            betas.retain(|b| !override_.exclude.contains(&b.as_str()));
+            betas.extend(override_.add.iter().map(|s| (*s).to_owned()));
         }
 
         // Filter out excluded betas (from previous failed requests due to long context errors)

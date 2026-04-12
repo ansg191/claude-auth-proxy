@@ -1,32 +1,25 @@
-use std::{
-    collections::{HashMap, HashSet},
-    env,
-    sync::LazyLock,
-};
+use std::collections::{HashMap, HashSet};
 
 use tracing::{debug, trace};
 
 use crate::{
-    ENV_VERSION, Error,
+    TransformConfig, Error,
     bodies::{Message, MessageBody, MessageContent, SystemEntry},
     config::CONFIG,
     signing::build_billing_header_value,
 };
 
-static ENV_ENTRYPOINT: LazyLock<Option<String>> =
-    LazyLock::new(|| env::var("CLAUDE_CODE_ENTRYPOINT").ok());
-
 const SYSTEM_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 const TOOL_PREFIX: &str = "mcp_";
 const BILLING_PREFIX: &str = "x-anthropic-billing-header";
 
-pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+pub fn transform_body(bytes: &[u8], config: &TransformConfig) -> Result<Vec<u8>, Error> {
     let Ok(mut parsed): Result<MessageBody, _> = serde_json::from_slice(bytes) else {
         debug!("Failed to parse body, skipping transformation");
         return Ok(bytes.to_vec());
     };
 
-    inject_billing_header(&mut parsed);
+    inject_billing_header(&mut parsed, config);
     ensure_identity_prefix(&mut parsed);
     split_identity_entries(&mut parsed);
     relocate_non_core_system_entries(&mut parsed);
@@ -79,9 +72,9 @@ pub fn transform_body(bytes: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 // --- Billing header: inject as system[0] (no cache_control) ---
-fn inject_billing_header(parsed: &mut MessageBody) {
-    let version = ENV_VERSION.as_deref().unwrap_or(CONFIG.cc_version);
-    let entrypoint = ENV_ENTRYPOINT.as_deref().unwrap_or("cli");
+fn inject_billing_header(parsed: &mut MessageBody, config: &TransformConfig) {
+    let version = &config.cc_version;
+    let entrypoint = &config.entrypoint;
     let billing_header = build_billing_header_value(&parsed.messages, version, entrypoint);
     trace!(billing_header, "Computed billing header");
 
@@ -317,7 +310,8 @@ mod tests {
     #[allow(clippy::needless_pass_by_value)]
     fn run_transform(input: Value) -> Value {
         let bytes = serde_json::to_vec(&input).unwrap();
-        let output = transform_body(&bytes).unwrap();
+        let config = TransformConfig::default();
+        let output = transform_body(&bytes, &config).unwrap();
         serde_json::from_slice(&output).unwrap()
     }
 
