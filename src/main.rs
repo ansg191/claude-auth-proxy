@@ -14,9 +14,7 @@ use axum::{
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use claude_auth_providers::{AnyAuthProvider, ClaudeAuthProvider};
-use claude_auth_transform::{
-    TransformConfig, TransformContext, transform_request, transform_response,
-};
+use claude_auth_transform::{TransformContext, transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
 use tokio::signal;
@@ -88,35 +86,23 @@ async fn run(config: ServerConfig) -> std::io::Result<()> {
         "Proxy configuration"
     );
 
-    let mut transform_config = TransformConfig::default();
-    if let Ok(v) = std::env::var("ANTHROPIC_CLI_VERSION") {
-        transform_config.cc_version = v;
-    }
-    if let Ok(v) = std::env::var("CLAUDE_CODE_ENTRYPOINT") {
-        transform_config.entrypoint = v;
-    }
-    transform_config.user_agent_override = std::env::var("ANTHROPIC_USER_AGENT").ok();
-    transform_config.beta_flags_override =
-        std::env::var("ANTHROPIC_BETA_FLAGS").ok().map(|flags| {
-            flags
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect()
-        });
+    let transform_config = config.transform.clone().into_transform_config();
 
     tracing::info!(
         cc_version = %transform_config.cc_version,
         entrypoint = %transform_config.entrypoint,
         user_agent_override = ?transform_config.user_agent_override,
-        beta_flags_override = ?transform_config.beta_flags_override,
-        session_id = %transform_config.session_id,
+        base_betas = ?transform_config.base_betas,
         "Transform configuration"
+    );
+    tracing::debug!(
+        session_id = %transform_config.session_id,
+        "Transform session"
     );
 
     let host = config.host;
     let port = config.port;
+    let transform = TransformContext::new(transform_config);
     let state = Arc::new(ServerState {
         auth: AnyAuthProvider::from_env(),
         client: Client::builder()
@@ -125,7 +111,7 @@ async fn run(config: ServerConfig) -> std::io::Result<()> {
             .build()
             .expect("failed to build HTTP client"),
         config,
-        transform: TransformContext::new(transform_config),
+        transform,
     });
 
     let app = Router::new()

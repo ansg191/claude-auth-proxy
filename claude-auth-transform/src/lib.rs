@@ -14,6 +14,10 @@ use uuid::Uuid;
 
 use crate::{betas::BetaManager, transforms::transform_body};
 
+/// Default CLI version string (from `ModelConfig`). Exposed as a constant
+/// so the main crate can use it for clap default values.
+pub const DEFAULT_CC_VERSION: &str = config::CONFIG.cc_version;
+
 /// Runtime configuration for the transform layer.
 ///
 /// Constructed once at startup from environment variables and defaults.
@@ -28,9 +32,10 @@ pub struct TransformConfig {
     /// Full user-agent override (from `ANTHROPIC_USER_AGENT`). When `None`,
     /// computed as `"claude-cli/{cc_version} (external, cli)"`.
     pub user_agent_override: Option<String>,
-    /// Beta flag override (from `ANTHROPIC_BETA_FLAGS`). When `None`, uses
-    /// `ModelConfig.base_betas`. When `Some`, entirely replaces base betas.
-    pub beta_flags_override: Option<Vec<String>>,
+    /// Resolved base beta flags. When `ANTHROPIC_BETA_FLAGS` is set, this
+    /// holds the parsed override; otherwise it holds `ModelConfig.base_betas`.
+    /// Cached at startup to avoid per-request allocations.
+    pub base_betas: Vec<String>,
     /// Stable per-process session ID.
     pub session_id: String,
 }
@@ -41,27 +46,56 @@ impl Default for TransformConfig {
             cc_version: config::CONFIG.cc_version.to_owned(),
             entrypoint: "cli".to_owned(),
             user_agent_override: None,
-            beta_flags_override: None,
+            base_betas: config::CONFIG
+                .base_betas
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
             session_id: Uuid::new_v4().to_string(),
         }
     }
 }
 
-/// Bundles [`TransformConfig`] with stateful components ([`BetaManager`]).
+/// Bundles [`TransformConfig`] with stateful components ([`BetaManager`])
+/// and pre-computed header values.
 ///
 /// Created once at startup and shared across requests via `Arc`.
-#[derive(Debug)]
 pub struct TransformContext {
     pub config: TransformConfig,
     beta_manager: BetaManager,
+    /// Pre-computed user-agent header value (avoids per-request formatting).
+    user_agent: HeaderValue,
+}
+
+impl std::fmt::Debug for TransformContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransformContext")
+            .field("config", &self.config)
+            .field("beta_manager", &self.beta_manager)
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
 }
 
 impl TransformContext {
+    /// Build a new context, pre-computing the user-agent header value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the resolved user-agent string is not valid ASCII.
     #[must_use]
     pub fn new(config: TransformConfig) -> Self {
+        let user_agent = config.user_agent_override.as_ref().map_or_else(
+            || {
+                HeaderValue::from_str(&format!("claude-cli/{} (external, cli)", config.cc_version))
+                    .expect("User agent must be valid ascii")
+            },
+            |ua| HeaderValue::from_str(ua).expect("User agent must be valid ascii"),
+        );
         Self {
             beta_manager: BetaManager::new(),
             config,
+            user_agent,
         }
     }
 }
@@ -132,17 +166,6 @@ fn build_request_headers(
     let merged_betas =
         HeaderValue::from_str(&merged_betas.join(",")).expect("Betas should all be valid ascii");
 
-    let user_agent = ctx.config.user_agent_override.as_ref().map_or_else(
-        || {
-            HeaderValue::from_str(&format!(
-                "claude-cli/{} (external, cli)",
-                ctx.config.cc_version
-            ))
-            .expect("User agent must be valid ascii")
-        },
-        |ua| HeaderValue::from_str(ua).expect("User agent must be valid ascii"),
-    );
-
     headers.insert(
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {access_token}")).unwrap(),
@@ -150,7 +173,7 @@ fn build_request_headers(
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     headers.insert("anthropic-beta", merged_betas);
     headers.insert("x-app", HeaderValue::from_static("cli"));
-    headers.insert("user-agent", user_agent);
+    headers.insert("user-agent", ctx.user_agent.clone());
     headers.insert(
         "x-client-request-id",
         HeaderValue::from_str(&Uuid::new_v4().to_string()).unwrap(),

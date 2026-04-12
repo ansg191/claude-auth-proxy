@@ -5,13 +5,6 @@ use std::{
 
 use crate::{TransformConfig, config::CONFIG};
 
-fn get_required_betas(config: &TransformConfig) -> Vec<String> {
-    config.beta_flags_override.as_ref().map_or_else(
-        || CONFIG.base_betas.iter().map(|s| (*s).to_owned()).collect(),
-        Clone::clone,
-    )
-}
-
 #[derive(Debug)]
 pub struct BetaManager {
     /// Session-level cache of excluded beta flags per model
@@ -28,7 +21,7 @@ impl BetaManager {
     // TODO: add & clear excluded beta methods
 
     pub fn get_model_betas(&self, model: &str, config: &TransformConfig) -> Vec<String> {
-        let mut betas = get_required_betas(config);
+        let mut betas = config.base_betas.clone();
 
         // TODO: handle 1m context beta
 
