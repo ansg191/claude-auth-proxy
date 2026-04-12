@@ -57,13 +57,30 @@ mod platform {
             .replace('\'', "&apos;")
     }
 
-    fn build_plist(binary: &str, log_path: &str, config: &crate::config::ServerConfig) -> String {
+    /// Default PATH for launchd agents. macOS launchd only provides
+    /// `/usr/bin:/bin:/usr/sbin:/sbin`, which excludes common install
+    /// locations for developer tools.
+    const LAUNCHD_DEFAULT_PATH: &str =
+        "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+    fn build_plist(
+        binary: &str,
+        log_path: &str,
+        config: &crate::config::ServerConfig,
+        claude_bin_dir: Option<&str>,
+    ) -> String {
         let prog_args_xml = format!(
             "\t\t<string>{}</string>\n\t\t<string>run</string>",
             xml_escape(binary)
         );
 
+        let path_value = claude_bin_dir.map_or_else(
+            || LAUNCHD_DEFAULT_PATH.to_string(),
+            |dir| format!("{}:{LAUNCHD_DEFAULT_PATH}", xml_escape(dir)),
+        );
+
         let env_vars = [
+            ("PATH", path_value),
             ("RUST_LOG", "info".to_string()),
             ("CLAUDE_PROXY_HOST", xml_escape(&config.host.to_string())),
             ("CLAUDE_PROXY_PORT", config.port.to_string()),
@@ -150,6 +167,31 @@ mod platform {
             );
         }
 
+        let claude_bin_dir = match which::which("claude") {
+            Ok(path) => path.parent().and_then(|dir| {
+                let dir = dir.to_str().map(ToOwned::to_owned);
+                dir.map_or_else(
+                    || {
+                        warn!("claude code path contains invalid characters");
+                        None
+                    },
+                    |dir| {
+                        info!(path = %dir, "discovered claude binary directory");
+                        Some(dir)
+                    },
+                )
+            }),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "claude binary not found in PATH; \
+                     CLI credential refresh will not work until claude is installed \
+                     and the service is reinstalled",
+                );
+                None
+            }
+        };
+
         let launch_agents = format!("{home}/Library/LaunchAgents");
         std::fs::create_dir_all(&launch_agents).map_err(InstallError::CreateDir)?;
 
@@ -163,7 +205,12 @@ mod platform {
             launchctl_unload(&plist_path);
         }
 
-        let plist_xml = build_plist(&binary_str, &log_path, &args.config);
+        let plist_xml = build_plist(
+            &binary_str,
+            &log_path,
+            &args.config,
+            claude_bin_dir.as_deref(),
+        );
         std::fs::write(&plist_path, &plist_xml).map_err(InstallError::WritePlist)?;
 
         let output = std::process::Command::new("launchctl")
