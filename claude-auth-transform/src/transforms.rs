@@ -52,7 +52,7 @@ pub fn transform_body(bytes: &[u8], config: &TransformConfig) -> Result<Vec<u8>,
         name.insert_str(0, TOOL_PREFIX);
     }
 
-    parsed.messages.iter_mut().for_each(|message| {
+    for message in &mut parsed.messages {
         if let Some(MessageContent::Blocks(blocks)) = message.content.as_mut() {
             for block in blocks.iter_mut() {
                 if let Some(tp) = block.r#type.as_deref()
@@ -60,15 +60,20 @@ pub fn transform_body(bytes: &[u8], config: &TransformConfig) -> Result<Vec<u8>,
                     && let Some(name) = block.extra.get_mut("name")
                     && name.is_string()
                 {
-                    *name = format!("{}{}", TOOL_PREFIX, name.as_str().unwrap()).into();
+                    *name = format!(
+                        "{}{}",
+                        TOOL_PREFIX,
+                        name.as_str().expect("name already checked as string")
+                    )
+                    .into();
                 }
             }
         }
-    });
+    }
 
     repair_tool_pairs(&mut parsed.messages);
 
-    Ok(serde_json::to_vec(&parsed)?)
+    serde_json::to_vec(&parsed).map_err(Error::Json)
 }
 
 // --- Billing header: inject as system[0] (no cache_control) ---

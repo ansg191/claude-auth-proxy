@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run(config: ServerConfig) -> std::io::Result<()> {
+async fn run(config: ServerConfig) -> anyhow::Result<()> {
     tracing::info!(
         host = %config.host,
         port = config.port,
@@ -102,7 +102,7 @@ async fn run(config: ServerConfig) -> std::io::Result<()> {
 
     let host = config.host;
     let port = config.port;
-    let transform = TransformContext::new(transform_config);
+    let transform = TransformContext::new(transform_config)?;
     let state = Arc::new(ServerState {
         auth: AnyAuthProvider::from_env(),
         client: Client::builder()
