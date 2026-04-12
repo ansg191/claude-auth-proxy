@@ -245,20 +245,37 @@ async fn handle_401_retry(
 
     info!("Credentials refreshed after 401, retrying request with new token");
 
-    // Drain the original 401 response body so the connection returns to the pool.
-    drain_response(original_response).await;
-
     let req = transform_request(http::Request::from_parts(parts, body), &new_token)?;
     let (tx_parts, tx_body) = req.into_parts();
     let tx_body = Bytes::from(tx_body);
 
-    execute_with_retry(state, tx_parts, tx_body).await
+    match execute_with_retry(state, tx_parts, tx_body).await {
+        Ok(retry_response) => {
+            // The retry succeeded; drain the original 401 so the connection
+            // can return to the pool.
+            drain_response(original_response).await;
+            Ok(retry_response)
+        }
+        Err(e) => {
+            warn!(error = %e, "Retry after credential refresh failed, returning original 401");
+            Ok(original_response)
+        }
+    }
 }
 
 /// Drain a response body in a streaming fashion so the underlying connection
 /// can be returned to the pool without buffering in memory.
 async fn drain_response(mut response: reqwest::Response) {
-    while let Ok(Some(_)) = response.chunk().await {}
+    loop {
+        match response.chunk().await {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(e) => {
+                debug!(error = %e, "Failed to drain response body, connection may not be reused");
+                break;
+            }
+        }
+    }
 }
 
 /// Execute the upstream request with retries for transient failures.

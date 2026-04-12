@@ -5,10 +5,13 @@ use crate::{claude_code::ClaudeCodeAuthProvider, env_var::EnvVarAuthProvider};
 
 pub trait ClaudeAuthProvider {
     fn get_access_token(&self) -> impl Future<Output = Result<String, Error>>;
-    /// Force-refresh credentials, bypassing any expiry cache.
+    /// Attempt to force-refresh credentials.
     ///
-    /// Used when upstream returns 401 to obtain a genuinely new token.
-    /// Default implementation delegates to [`get_access_token`](Self::get_access_token).
+    /// Implementations that override this method may bypass any expiry cache
+    /// and obtain a genuinely new token, for example after an upstream 401.
+    /// The default implementation simply delegates to
+    /// [`get_access_token`](Self::get_access_token), so it may still return a
+    /// cached or otherwise non-refreshed token.
     fn force_refresh_token(&self) -> impl Future<Output = Result<String, Error>> {
         self.get_access_token()
     }
