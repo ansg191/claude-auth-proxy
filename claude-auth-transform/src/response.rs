@@ -1,5 +1,6 @@
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -9,31 +10,30 @@ use http_body::{Body, Frame, SizeHint};
 use regex::Regex;
 use tracing::{debug, trace};
 
+use crate::tool_names::ToolNameMapper;
+
 static TOOL_PREFIX_RE: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r#""name"\s*:\s*"mcp_([^"]+)""#).unwrap());
+    std::sync::LazyLock::new(|| Regex::new(r#""name"\s*:\s*"(t_[0-9a-f]+)""#).unwrap());
 
-fn unprefix_tool_name(name: &str) -> String {
-    let Some((first, rest)) = name.split_at_checked(1) else {
-        return String::new();
-    };
-    format!("{}{rest}", first.to_ascii_lowercase())
-}
-
-pub fn transform_response<B>(response: Response<B>) -> Response<ClaudeBody<B>>
+pub fn transform_response<B>(
+    response: Response<B>,
+    tool_name_mapper: Arc<ToolNameMapper>,
+) -> Response<ClaudeBody<B>>
 where
     B: Body,
 {
     response.map(|body| ClaudeBody {
         inner: body,
         buffer: BytesMut::new(),
+        tool_name_mapper,
     })
 }
 
-/// Strips `"name": "mcp_<tool>"` -> `"name": "<tool>"` from a byte slice.
-fn strip_tool_prefix(input: &[u8]) -> Bytes {
+/// Strips `"name": "t_<hash>"` -> `"name": "<tool>"` from a byte slice.
+fn strip_tool_prefix(input: &[u8], tool_name_mapper: &ToolNameMapper) -> Bytes {
     let text = String::from_utf8_lossy(input);
     let result = TOOL_PREFIX_RE.replace_all(&text, |caps: &regex::Captures<'_>| {
-        format!(r#""name": "{}""#, unprefix_tool_name(&caps[1]))
+        format!(r#""name": "{}""#, tool_name_mapper.deobfuscate(&caps[1]))
     });
     Bytes::from(result.into_owned())
 }
@@ -54,6 +54,7 @@ pub struct ClaudeBody<B> {
     inner: B,
     /// SSE line buffer for reassembling partial events
     buffer: BytesMut,
+    tool_name_mapper: Arc<ToolNameMapper>,
 }
 
 impl<B> Body for ClaudeBody<B>
@@ -76,7 +77,7 @@ where
             if let Some(boundary) = find_double_newline(this.buffer) {
                 let event_bytes = this.buffer.split_to(boundary + 2);
                 trace!(raw = %String::from_utf8_lossy(&event_bytes), "Raw SSE event");
-                let stripped = strip_tool_prefix(&event_bytes);
+                let stripped = strip_tool_prefix(&event_bytes, this.tool_name_mapper.as_ref());
                 return Poll::Ready(Some(Ok(Frame::data(stripped))));
             }
 
@@ -105,7 +106,8 @@ where
                     if !this.buffer.is_empty() {
                         let remaining = this.buffer.split();
                         trace!(raw = %String::from_utf8_lossy(&remaining), "Flushing remaining buffer");
-                        let stripped = strip_tool_prefix(&remaining);
+                        let stripped =
+                            strip_tool_prefix(&remaining, this.tool_name_mapper.as_ref());
                         return Poll::Ready(Some(Ok(Frame::data(stripped))));
                     }
                     debug!("Response body complete");
@@ -132,43 +134,67 @@ mod tests {
 
     #[test]
     fn strip_prefix_from_name_field() {
-        let input = r#"{"name": "mcp_Search", "id": "123"}"#;
-        let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
+        let tool_name_mapper = ToolNameMapper::new(8, 16);
+        let obfuscated = tool_name_mapper.obfuscate("search");
+        let input = format!(r#"{{"name": "{obfuscated}", "id": "123"}}"#);
+        let result =
+            String::from_utf8(strip_tool_prefix(input.as_bytes(), &tool_name_mapper).to_vec())
+                .unwrap();
         assert_eq!(result, r#"{"name": "search", "id": "123"}"#);
     }
 
     #[test]
     fn strip_prefix_multiple_occurrences() {
-        let input = r#"{"name": "mcp_Foo"} {"name": "mcp_Bar"}"#;
-        let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
+        let tool_name_mapper = ToolNameMapper::new(8, 16);
+        let foo = tool_name_mapper.obfuscate("foo");
+        let bar = tool_name_mapper.obfuscate("bar");
+        let input = format!(r#"{{"name": "{foo}"}} {{"name": "{bar}"}}"#);
+        let result =
+            String::from_utf8(strip_tool_prefix(input.as_bytes(), &tool_name_mapper).to_vec())
+                .unwrap();
         assert_eq!(result, r#"{"name": "foo"} {"name": "bar"}"#);
     }
 
     #[test]
     fn no_prefix_unchanged() {
         let input = r#"{"name": "search", "id": "123"}"#;
-        let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
+        let result = String::from_utf8(
+            strip_tool_prefix(input.as_bytes(), &ToolNameMapper::new(8, 16)).to_vec(),
+        )
+        .unwrap();
         assert_eq!(result, input);
     }
 
     #[test]
     fn strip_prefix_with_whitespace_around_colon() {
-        let input = r#"{"name" : "mcp_Tool"}"#;
-        let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
+        let tool_name_mapper = ToolNameMapper::new(8, 16);
+        let obfuscated = tool_name_mapper.obfuscate("tool");
+        let input = format!(r#"{{"name" : "{obfuscated}"}}"#);
+        let result =
+            String::from_utf8(strip_tool_prefix(input.as_bytes(), &tool_name_mapper).to_vec())
+                .unwrap();
         assert_eq!(result, r#"{"name": "tool"}"#);
     }
 
     #[test]
     fn does_not_strip_non_name_fields() {
-        let input = r#"{"id": "mcp_123", "name": "mcp_Tool"}"#;
-        let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
+        let tool_name_mapper = ToolNameMapper::new(8, 16);
+        let obfuscated = tool_name_mapper.obfuscate("tool");
+        let input = format!(r#"{{"id": "mcp_123", "name": "{obfuscated}"}}"#);
+        let result =
+            String::from_utf8(strip_tool_prefix(input.as_bytes(), &tool_name_mapper).to_vec())
+                .unwrap();
         assert_eq!(result, r#"{"id": "mcp_123", "name": "tool"}"#);
     }
 
     #[test]
-    fn strip_prefix_restores_snake_case_after_pascal_case_prefix() {
-        let input = r#"{"name": "mcp_Background_output"}"#;
-        let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
+    fn strip_prefix_restores_snake_case_after_obfuscation() {
+        let tool_name_mapper = ToolNameMapper::new(8, 16);
+        let obfuscated = tool_name_mapper.obfuscate("background_output");
+        let input = format!(r#"{{"name": "{obfuscated}"}}"#);
+        let result =
+            String::from_utf8(strip_tool_prefix(input.as_bytes(), &tool_name_mapper).to_vec())
+                .unwrap();
         assert_eq!(result, r#"{"name": "background_output"}"#);
     }
 

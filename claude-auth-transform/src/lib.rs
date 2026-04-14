@@ -4,11 +4,14 @@ mod config;
 mod error;
 mod response;
 mod signing;
+mod tool_names;
 mod transforms;
 
 pub use error::Error;
 use http::{HeaderMap, HeaderValue};
 pub use response::{ClaudeBody, transform_response};
+use std::sync::Arc;
+use tool_names::ToolNameMapper;
 use tracing::{debug, trace};
 use uuid::Uuid;
 
@@ -38,6 +41,10 @@ pub struct TransformConfig {
     pub base_betas: Vec<String>,
     /// Stable per-process session ID.
     pub session_id: String,
+    /// Minimum number of hex characters to use when obfuscating tool names.
+    pub tool_name_hash_len: usize,
+    /// Maximum number of hex characters to use when obfuscating tool names.
+    pub tool_name_max_hash_len: usize,
 }
 
 impl Default for TransformConfig {
@@ -52,6 +59,8 @@ impl Default for TransformConfig {
                 .map(|s| (*s).to_owned())
                 .collect(),
             session_id: Uuid::new_v4().to_string(),
+            tool_name_hash_len: 8,
+            tool_name_max_hash_len: 16,
         }
     }
 }
@@ -63,6 +72,7 @@ impl Default for TransformConfig {
 pub struct TransformContext {
     pub config: TransformConfig,
     beta_manager: BetaManager,
+    tool_name_mapper: Arc<ToolNameMapper>,
     /// Pre-computed user-agent header value (avoids per-request formatting).
     user_agent: HeaderValue,
 }
@@ -72,6 +82,7 @@ impl std::fmt::Debug for TransformContext {
         f.debug_struct("TransformContext")
             .field("config", &self.config)
             .field("beta_manager", &self.beta_manager)
+            .field("tool_name_mapper", &self.tool_name_mapper)
             .field("user_agent", &self.user_agent)
             .finish()
     }
@@ -84,6 +95,13 @@ impl TransformContext {
     ///
     /// Errors if the resolved user-agent string is not valid ASCII.
     pub fn new(config: TransformConfig) -> Result<Self, Error> {
+        if config.tool_name_hash_len > config.tool_name_max_hash_len {
+            return Err(Error::InvalidToolNameHashBounds(format!(
+                "min {} exceeds max {}",
+                config.tool_name_hash_len, config.tool_name_max_hash_len
+            )));
+        }
+
         let user_agent = config
             .user_agent_override
             .as_ref()
@@ -99,9 +117,17 @@ impl TransformContext {
             .map_err(Error::InvalidUserAgent)?;
         Ok(Self {
             beta_manager: BetaManager::new(),
+            tool_name_mapper: Arc::new(ToolNameMapper::new(
+                config.tool_name_hash_len,
+                config.tool_name_max_hash_len,
+            )),
             config,
             user_agent,
         })
+    }
+
+    pub fn tool_name_mapper(&self) -> Arc<ToolNameMapper> {
+        Arc::clone(&self.tool_name_mapper)
     }
 }
 
@@ -136,7 +162,7 @@ where
         ctx,
     )?;
 
-    let body = transform_body(body.as_ref(), &ctx.config)?;
+    let body = transform_body(body.as_ref(), &ctx.config, &ctx.tool_name_mapper)?;
 
     trace!(headers = ?parts.headers, "Transformed Headers");
     trace!(body = %String::from_utf8_lossy(&body).as_ref(), "Transformed Body");

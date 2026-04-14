@@ -104,6 +104,24 @@ pub struct TransformArgs {
         value_parser = parse_beta_flags,
     )]
     pub beta_flags_override: Option<Vec<String>>,
+
+    /// Minimum number of hex characters to use for obfuscated tool names.
+    #[arg(
+        long = "tool-name-hash-len",
+        env = "CLAUDE_PROXY_TOOL_NAME_HASH_LEN",
+        value_parser = parse_tool_name_hash_len,
+        default_value_t = 8,
+    )]
+    pub tool_name_hash_len: usize,
+
+    /// Maximum number of hex characters to use for obfuscated tool names.
+    #[arg(
+        long = "tool-name-max-hash-len",
+        env = "CLAUDE_PROXY_TOOL_NAME_MAX_HASH_LEN",
+        value_parser = parse_tool_name_hash_len,
+        default_value_t = 16,
+    )]
+    pub tool_name_max_hash_len: usize,
 }
 
 impl TransformArgs {
@@ -115,6 +133,8 @@ impl TransformArgs {
             entrypoint: self.entrypoint,
             user_agent_override: self.user_agent_override,
             base_betas: self.beta_flags_override.unwrap_or(default.base_betas),
+            tool_name_hash_len: self.tool_name_hash_len,
+            tool_name_max_hash_len: self.tool_name_max_hash_len,
             ..default
         }
     }
@@ -142,4 +162,18 @@ fn parse_bool_flag(s: &str) -> Result<bool, String> {
         "0" | "false" | "FALSE" | "False" | "no" | "NO" => Ok(false),
         other => Err(format!("invalid boolean value: {other}")),
     }
+}
+
+fn parse_tool_name_hash_len(s: &str) -> Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|e| format!("invalid tool-name-hash-len '{s}': {e}"))?;
+
+    if !(1..=64).contains(&value) {
+        return Err(format!(
+            "invalid tool-name-hash-len '{s}': expected a value between 1 and 64"
+        ));
+    }
+
+    Ok(value)
 }

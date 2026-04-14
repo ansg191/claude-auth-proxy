@@ -93,6 +93,8 @@ async fn run(config: ServerConfig) -> anyhow::Result<()> {
         entrypoint = %transform_config.entrypoint,
         user_agent_override = ?transform_config.user_agent_override,
         base_betas = ?transform_config.base_betas,
+        tool_name_hash_len = transform_config.tool_name_hash_len,
+        tool_name_max_hash_len = transform_config.tool_name_max_hash_len,
         "Transform configuration"
     );
     tracing::debug!(
@@ -230,7 +232,7 @@ async fn messages_handler(
     *response.headers_mut() = headers;
 
     // Wrap through ClaudeBody to strip tool prefixes from SSE events
-    Ok(transform_response(response).map(Body::new))
+    Ok(transform_response(response, state.transform.tool_name_mapper()).map(Body::new))
 }
 
 /// When upstream returns 401 Unauthorized, attempt a forced credential
