@@ -12,6 +12,13 @@ use tracing::{debug, trace};
 static TOOL_PREFIX_RE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r#""name"\s*:\s*"mcp_([^"]+)""#).unwrap());
 
+fn unprefix_tool_name(name: &str) -> String {
+    let Some((first, rest)) = name.split_at_checked(1) else {
+        return String::new();
+    };
+    format!("{}{rest}", first.to_ascii_lowercase())
+}
+
 pub fn transform_response<B>(response: Response<B>) -> Response<ClaudeBody<B>>
 where
     B: Body,
@@ -25,7 +32,9 @@ where
 /// Strips `"name": "mcp_<tool>"` -> `"name": "<tool>"` from a byte slice.
 fn strip_tool_prefix(input: &[u8]) -> Bytes {
     let text = String::from_utf8_lossy(input);
-    let result = TOOL_PREFIX_RE.replace_all(&text, r#""name": "$1""#);
+    let result = TOOL_PREFIX_RE.replace_all(&text, |caps: &regex::Captures<'_>| {
+        format!(r#""name": "{}""#, unprefix_tool_name(&caps[1]))
+    });
     Bytes::from(result.into_owned())
 }
 
@@ -123,14 +132,14 @@ mod tests {
 
     #[test]
     fn strip_prefix_from_name_field() {
-        let input = r#"{"name": "mcp_search", "id": "123"}"#;
+        let input = r#"{"name": "mcp_Search", "id": "123"}"#;
         let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
         assert_eq!(result, r#"{"name": "search", "id": "123"}"#);
     }
 
     #[test]
     fn strip_prefix_multiple_occurrences() {
-        let input = r#"{"name": "mcp_foo"} {"name": "mcp_bar"}"#;
+        let input = r#"{"name": "mcp_Foo"} {"name": "mcp_Bar"}"#;
         let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
         assert_eq!(result, r#"{"name": "foo"} {"name": "bar"}"#);
     }
@@ -144,16 +153,23 @@ mod tests {
 
     #[test]
     fn strip_prefix_with_whitespace_around_colon() {
-        let input = r#"{"name" : "mcp_tool"}"#;
+        let input = r#"{"name" : "mcp_Tool"}"#;
         let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
         assert_eq!(result, r#"{"name": "tool"}"#);
     }
 
     #[test]
     fn does_not_strip_non_name_fields() {
-        let input = r#"{"id": "mcp_123", "name": "mcp_tool"}"#;
+        let input = r#"{"id": "mcp_123", "name": "mcp_Tool"}"#;
         let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
         assert_eq!(result, r#"{"id": "mcp_123", "name": "tool"}"#);
+    }
+
+    #[test]
+    fn strip_prefix_restores_snake_case_after_pascal_case_prefix() {
+        let input = r#"{"name": "mcp_Background_output"}"#;
+        let result = String::from_utf8(strip_tool_prefix(input.as_bytes()).to_vec()).unwrap();
+        assert_eq!(result, r#"{"name": "background_output"}"#);
     }
 
     #[test]

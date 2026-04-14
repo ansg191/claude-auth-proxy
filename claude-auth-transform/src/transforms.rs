@@ -13,6 +13,13 @@ const SYSTEM_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for
 const TOOL_PREFIX: &str = "mcp_";
 const BILLING_PREFIX: &str = "x-anthropic-billing-header";
 
+fn prefix_tool_name(name: &str) -> String {
+    let Some((first, rest)) = name.split_at_checked(1) else {
+        return TOOL_PREFIX.to_owned();
+    };
+    format!("{TOOL_PREFIX}{}{rest}", first.to_ascii_uppercase())
+}
+
 pub fn transform_body(bytes: &[u8], config: &TransformConfig) -> Result<Vec<u8>, Error> {
     let Ok(mut parsed): Result<MessageBody, _> = serde_json::from_slice(bytes) else {
         debug!("Failed to parse body, skipping transformation");
@@ -39,17 +46,18 @@ pub fn transform_body(bytes: &[u8], config: &TransformConfig) -> Result<Vec<u8>,
         parsed.thinking.remove("effort");
     }
 
-    // Prefix all tool names with a reserved prefix
+    // Anthropic validates Claude Code tool names as PascalCase after the
+    // reserved mcp_ prefix (for example mcp_Bash instead of mcp_bash).
     parsed.tools.iter_mut().for_each(|tool| {
         if let Some(name) = tool.name.as_mut() {
-            name.insert_str(0, TOOL_PREFIX);
+            *name = prefix_tool_name(name);
         }
     });
 
     if let Some(tool_choice) = parsed.tool_choice.as_mut()
         && let Some(name) = tool_choice.name.as_mut()
     {
-        name.insert_str(0, TOOL_PREFIX);
+        *name = prefix_tool_name(name);
     }
 
     for message in &mut parsed.messages {
@@ -60,12 +68,9 @@ pub fn transform_body(bytes: &[u8], config: &TransformConfig) -> Result<Vec<u8>,
                     && let Some(name) = block.extra.get_mut("name")
                     && name.is_string()
                 {
-                    *name = format!(
-                        "{}{}",
-                        TOOL_PREFIX,
-                        name.as_str().expect("name already checked as string")
-                    )
-                    .into();
+                    *name =
+                        prefix_tool_name(name.as_str().expect("name already checked as string"))
+                            .into();
                 }
             }
         }
@@ -321,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn transform_body_moves_non_core_system_text_and_prefixes_tool_names() {
+    fn transform_body_moves_non_core_system_text_and_pascal_cases_tool_names() {
         let input = json!({
             "system": [{ "type": "text", "text": "OpenCode and opencode" }],
             "tools": [{ "name": "search" }],
@@ -345,8 +350,8 @@ mod tests {
             parsed["messages"][0]["content"][0]["text"],
             "OpenCode and opencode"
         );
-        assert_eq!(parsed["tools"][0]["name"], "mcp_search");
-        assert_eq!(parsed["messages"][0]["content"][1]["name"], "mcp_lookup");
+        assert_eq!(parsed["tools"][0]["name"], "mcp_Search");
+        assert_eq!(parsed["messages"][0]["content"][1]["name"], "mcp_Lookup");
     }
 
     #[test]
@@ -664,7 +669,7 @@ mod tests {
         let parsed = run_transform(input);
 
         assert_eq!(parsed["tool_choice"]["type"], "tool");
-        assert_eq!(parsed["tool_choice"]["name"], "mcp_get_weather");
+        assert_eq!(parsed["tool_choice"]["name"], "mcp_Get_weather");
     }
 
     #[test]
@@ -729,10 +734,10 @@ mod tests {
 
         let parsed = run_transform(input);
 
-        assert_eq!(parsed["tools"][0]["name"], "mcp_search");
-        assert_eq!(parsed["tools"][1]["name"], "mcp_analyze");
+        assert_eq!(parsed["tools"][0]["name"], "mcp_Search");
+        assert_eq!(parsed["tools"][1]["name"], "mcp_Analyze");
         assert_eq!(parsed["tool_choice"]["type"], "tool");
-        assert_eq!(parsed["tool_choice"]["name"], "mcp_analyze");
+        assert_eq!(parsed["tool_choice"]["name"], "mcp_Analyze");
     }
 
     #[test]
@@ -750,7 +755,7 @@ mod tests {
         let parsed = run_transform(input);
 
         assert_eq!(parsed["tool_choice"]["type"], "tool");
-        assert_eq!(parsed["tool_choice"]["name"], "mcp_analyze");
+        assert_eq!(parsed["tool_choice"]["name"], "mcp_Analyze");
         assert_eq!(parsed["tool_choice"]["disable_parallel_tool_use"], true);
     }
 }
