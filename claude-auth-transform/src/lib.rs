@@ -7,10 +7,11 @@ mod signing;
 mod tool_names;
 mod transforms;
 
+use std::sync::Arc;
+
 pub use error::Error;
 use http::{HeaderMap, HeaderValue};
 pub use response::{ClaudeBody, transform_response};
-use std::sync::Arc;
 use tool_names::ToolNameMapper;
 use tracing::{debug, trace};
 use uuid::Uuid;

@@ -348,14 +348,18 @@ mod tests {
             parsed["messages"][0]["content"][0]["text"],
             "OpenCode and opencode"
         );
-        assert!(parsed["tools"][0]["name"]
-            .as_str()
-            .unwrap()
-            .starts_with("t_"));
-        assert!(parsed["messages"][0]["content"][1]["name"]
-            .as_str()
-            .unwrap()
-            .starts_with("t_"));
+        assert!(
+            parsed["tools"][0]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
+        assert!(
+            parsed["messages"][0]["content"][1]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
     }
 
     #[test]
@@ -673,10 +677,12 @@ mod tests {
         let parsed = run_transform(input);
 
         assert_eq!(parsed["tool_choice"]["type"], "tool");
-        assert!(parsed["tool_choice"]["name"]
-            .as_str()
-            .unwrap()
-            .starts_with("t_"));
+        assert!(
+            parsed["tool_choice"]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
     }
 
     #[test]
@@ -741,8 +747,18 @@ mod tests {
 
         let parsed = run_transform(input);
 
-        assert!(parsed["tools"][0]["name"].as_str().unwrap().starts_with("t_"));
-        assert!(parsed["tools"][1]["name"].as_str().unwrap().starts_with("t_"));
+        assert!(
+            parsed["tools"][0]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
+        assert!(
+            parsed["tools"][1]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
         assert_eq!(parsed["tool_choice"]["type"], "tool");
         assert_eq!(parsed["tool_choice"]["name"], parsed["tools"][1]["name"]);
     }
