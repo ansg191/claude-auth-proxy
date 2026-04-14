@@ -14,9 +14,10 @@ const TOOL_PREFIX: &str = "mcp_";
 const BILLING_PREFIX: &str = "x-anthropic-billing-header";
 
 fn prefix_tool_name(name: &str) -> String {
-    let Some((first, rest)) = name.split_at_checked(1) else {
+    let Some(first) = name.chars().next() else {
         return TOOL_PREFIX.to_owned();
     };
+    let rest = &name[first.len_utf8()..];
     format!("{TOOL_PREFIX}{}{rest}", first.to_ascii_uppercase())
 }
 

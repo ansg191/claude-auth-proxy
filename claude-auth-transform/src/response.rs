@@ -13,9 +13,10 @@ static TOOL_PREFIX_RE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r#""name"\s*:\s*"mcp_([^"]+)""#).unwrap());
 
 fn unprefix_tool_name(name: &str) -> String {
-    let Some((first, rest)) = name.split_at_checked(1) else {
+    let Some(first) = name.chars().next() else {
         return String::new();
     };
+    let rest = &name[first.len_utf8()..];
     format!("{}{rest}", first.to_ascii_lowercase())
 }
 
