@@ -12,4 +12,6 @@ pub enum Error {
     InvalidBetas(#[source] InvalidHeaderValue),
     #[error("failed to serialize JSON: {0}")]
     Json(#[source] serde_json::Error),
+    #[error("invalid tool-name hash bounds: {0}")]
+    InvalidToolNameHashBounds(String),
 }

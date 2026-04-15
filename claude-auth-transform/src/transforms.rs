@@ -7,13 +7,17 @@ use crate::{
     bodies::{Message, MessageBody, MessageContent, SystemEntry},
     config::CONFIG,
     signing::build_billing_header_value,
+    tool_names::ToolNameMapper,
 };
 
 const SYSTEM_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-const TOOL_PREFIX: &str = "mcp_";
 const BILLING_PREFIX: &str = "x-anthropic-billing-header";
 
-pub fn transform_body(bytes: &[u8], config: &TransformConfig) -> Result<Vec<u8>, Error> {
+pub fn transform_body(
+    bytes: &[u8],
+    config: &TransformConfig,
+    tool_name_mapper: &ToolNameMapper,
+) -> Result<Vec<u8>, Error> {
     let Ok(mut parsed): Result<MessageBody, _> = serde_json::from_slice(bytes) else {
         debug!("Failed to parse body, skipping transformation");
         return Ok(bytes.to_vec());
@@ -39,17 +43,17 @@ pub fn transform_body(bytes: &[u8], config: &TransformConfig) -> Result<Vec<u8>,
         parsed.thinking.remove("effort");
     }
 
-    // Prefix all tool names with a reserved prefix
+    // Obfuscate all tool names to avoid name-based upstream validation.
     parsed.tools.iter_mut().for_each(|tool| {
         if let Some(name) = tool.name.as_mut() {
-            name.insert_str(0, TOOL_PREFIX);
+            *name = tool_name_mapper.obfuscate(name);
         }
     });
 
     if let Some(tool_choice) = parsed.tool_choice.as_mut()
         && let Some(name) = tool_choice.name.as_mut()
     {
-        name.insert_str(0, TOOL_PREFIX);
+        *name = tool_name_mapper.obfuscate(name);
     }
 
     for message in &mut parsed.messages {
@@ -60,12 +64,9 @@ pub fn transform_body(bytes: &[u8], config: &TransformConfig) -> Result<Vec<u8>,
                     && let Some(name) = block.extra.get_mut("name")
                     && name.is_string()
                 {
-                    *name = format!(
-                        "{}{}",
-                        TOOL_PREFIX,
-                        name.as_str().expect("name already checked as string")
-                    )
-                    .into();
+                    *name = tool_name_mapper
+                        .obfuscate(name.as_str().expect("name already checked as string"))
+                        .into();
                 }
             }
         }
@@ -316,12 +317,14 @@ mod tests {
     fn run_transform(input: Value) -> Value {
         let bytes = serde_json::to_vec(&input).unwrap();
         let config = TransformConfig::default();
-        let output = transform_body(&bytes, &config).unwrap();
+        let tool_name_mapper =
+            ToolNameMapper::new(config.tool_name_hash_len, config.tool_name_max_hash_len);
+        let output = transform_body(&bytes, &config, &tool_name_mapper).unwrap();
         serde_json::from_slice(&output).unwrap()
     }
 
     #[test]
-    fn transform_body_moves_non_core_system_text_and_prefixes_tool_names() {
+    fn transform_body_moves_non_core_system_text_and_obfuscates_tool_names() {
         let input = json!({
             "system": [{ "type": "text", "text": "OpenCode and opencode" }],
             "tools": [{ "name": "search" }],
@@ -345,8 +348,18 @@ mod tests {
             parsed["messages"][0]["content"][0]["text"],
             "OpenCode and opencode"
         );
-        assert_eq!(parsed["tools"][0]["name"], "mcp_search");
-        assert_eq!(parsed["messages"][0]["content"][1]["name"], "mcp_lookup");
+        assert!(
+            parsed["tools"][0]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
+        assert!(
+            parsed["messages"][0]["content"][1]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
     }
 
     #[test]
@@ -664,7 +677,12 @@ mod tests {
         let parsed = run_transform(input);
 
         assert_eq!(parsed["tool_choice"]["type"], "tool");
-        assert_eq!(parsed["tool_choice"]["name"], "mcp_get_weather");
+        assert!(
+            parsed["tool_choice"]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
     }
 
     #[test]
@@ -729,10 +747,20 @@ mod tests {
 
         let parsed = run_transform(input);
 
-        assert_eq!(parsed["tools"][0]["name"], "mcp_search");
-        assert_eq!(parsed["tools"][1]["name"], "mcp_analyze");
+        assert!(
+            parsed["tools"][0]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
+        assert!(
+            parsed["tools"][1]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_")
+        );
         assert_eq!(parsed["tool_choice"]["type"], "tool");
-        assert_eq!(parsed["tool_choice"]["name"], "mcp_analyze");
+        assert_eq!(parsed["tool_choice"]["name"], parsed["tools"][1]["name"]);
     }
 
     #[test]
@@ -750,7 +778,7 @@ mod tests {
         let parsed = run_transform(input);
 
         assert_eq!(parsed["tool_choice"]["type"], "tool");
-        assert_eq!(parsed["tool_choice"]["name"], "mcp_analyze");
+        assert_eq!(parsed["tool_choice"]["name"], parsed["tools"][0]["name"]);
         assert_eq!(parsed["tool_choice"]["disable_parallel_tool_use"], true);
     }
 }
