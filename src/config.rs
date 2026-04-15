@@ -1,5 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr},
+    path::PathBuf,
     time::Duration,
 };
 
@@ -71,6 +72,10 @@ pub struct ServerConfig {
     /// `retry_on_5xx` is enabled. Typically shorter than `max_retries`.
     #[arg(long, env = "PROXY_5XX_MAX_RETRIES", default_value_t = 1)]
     pub max_5xx_retries: u32,
+
+    /// Dump upstream requests to this directory, if set.
+    #[arg(long, env = "PROXY_DUMP_REQ_DIR")]
+    pub dump_req_dir: Option<PathBuf>,
 }
 
 /// Transform-layer configuration parsed from environment variables and CLI

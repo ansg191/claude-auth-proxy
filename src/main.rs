@@ -1,8 +1,7 @@
 mod config;
 mod error;
 mod install;
-
-use std::{sync::Arc, time::Duration};
+use std::{io::Write, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -204,6 +203,11 @@ async fn messages_handler(
         &token,
         &state.transform,
     )?;
+
+    if let Err(e) = dump_request(&req, &state) {
+        warn!(error = %e, "Failed to dump request");
+    }
+
     let (tx_parts, tx_body) = req.into_parts();
     debug!("Forwarding request: {} {}", tx_parts.method, tx_parts.uri);
 
@@ -231,6 +235,44 @@ async fn messages_handler(
 
     // Wrap through ClaudeBody to strip tool prefixes from SSE events
     Ok(transform_response(response).map(Body::new))
+}
+
+fn dump_request(
+    req: &http::Request<Vec<u8>>,
+    state: &Arc<ServerState>,
+) -> Result<(), std::io::Error> {
+    let Some(dump_path) = &state.config.dump_req_dir else {
+        return Ok(());
+    };
+
+    let id = req
+        .headers()
+        .get("x-client-request-id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Missing x-client-request-id header for request dump filename",
+        ))?;
+
+    let filename = format!("req_{}.txt", id);
+    let path = dump_path.join(filename);
+
+    let mut file = std::fs::File::create(path)?;
+
+    write!(file, "{} {}\r\n", req.method(), req.uri())?;
+    for (name, value) in req.headers() {
+        write!(
+            file,
+            "{}: {}\r\n",
+            name,
+            value.to_str().unwrap_or("<binary>")
+        )?;
+    }
+    write!(file, "\r\n")?;
+
+    file.write_all(req.body())?;
+
+    Ok(())
 }
 
 /// When upstream returns 401 Unauthorized, attempt a forced credential
