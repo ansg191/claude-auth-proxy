@@ -5,6 +5,7 @@ workspace = true
 name = "claude-auth-transform"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 bimap = "0.6.3"

@@ -5,6 +5,7 @@ workspace = true
 name = "claude-auth-providers"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 dirs = "6"
