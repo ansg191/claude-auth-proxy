@@ -1,7 +1,7 @@
 mod config;
 mod error;
 mod install;
-use std::{io::Write, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
@@ -16,6 +16,7 @@ use claude_auth_providers::{AnyAuthProvider, ClaudeAuthProvider};
 use claude_auth_transform::{TransformContext, transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
+use tokio::io::AsyncWriteExt;
 use tokio::signal;
 use tracing::{debug, info, warn};
 
@@ -74,6 +75,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(config: ServerConfig) -> anyhow::Result<()> {
+    if let Some(dump_req_dir) = &config.dump_req_dir {
+        warn!(
+            dump_req_dir = %dump_req_dir.display(),
+            "Request dumping is enabled for debugging and may grow disk usage over time"
+        );
+    }
+
     tracing::info!(
         host = %config.host,
         port = config.port,
@@ -245,44 +253,31 @@ async fn dump_request(
         return Ok(());
     };
 
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let headers = req.headers().clone();
-    let body = req.body().clone();
+    let id = req
+        .headers()
+        .get("x-client-request-id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Missing x-client-request-id header for request dump filename",
+            )
+        })?;
 
-    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-        let id = headers
-            .get("x-client-request-id")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Missing x-client-request-id header for request dump filename",
-                )
-            })?;
+    let filename = format!("req_{id}.txt");
+    let path = dump_path.join(filename);
+    let mut file = tokio::fs::File::create(path).await?;
 
-        let filename = format!("req_{id}.txt");
-        let path = dump_path.join(filename);
-
-        let mut file = std::fs::File::create(path)?;
-
-        write!(file, "{method} {uri}\r\n")?;
-        for (name, value) in &headers {
-            write!(
-                file,
-                "{}: {}\r\n",
-                name,
-                value.to_str().unwrap_or("<binary>")
-            )?;
-        }
-        write!(file, "\r\n")?;
-        file.write_all(&body)?;
-
-        Ok(())
-    })
-    .await
-    .map_err(|e| std::io::Error::other(format!("request dump task failed: {e}")))?
-    .map_err(|e| std::io::Error::new(e.kind(), format!("request dump I/O failed: {e}")))
+    file.write_all(format!("{} {}\r\n", req.method(), req.uri()).as_bytes())
+        .await?;
+    for (name, value) in req.headers() {
+        file.write_all(
+            format!("{}: {}\r\n", name, value.to_str().unwrap_or("<binary>")).as_bytes(),
+        )
+        .await?;
+    }
+    file.write_all(b"\r\n").await?;
+    file.write_all(req.body()).await
 }
 
 /// When upstream returns 401 Unauthorized, attempt a forced credential
