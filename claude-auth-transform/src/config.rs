@@ -54,5 +54,11 @@ pub const CONFIG: ModelConfig<'static> = ModelConfig {
             add: &["effort-2025-11-24"],
             disable_effort: false,
         },
+        ModelOverride {
+            model: "4-7",
+            exclude: &[],
+            add: &["effort-2025-11-24"],
+            disable_effort: false,
+        },
     ],
 };
