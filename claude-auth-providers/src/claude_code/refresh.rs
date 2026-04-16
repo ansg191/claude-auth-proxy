@@ -12,8 +12,8 @@ use crate::{
 const OAUTH_TOKEN_URL: &str = "https://claude.ai/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
-const EXPIRE_BUFFER: Duration = Duration::from_mins(60);
-const CLI_TIMEOUT: Duration = Duration::from_secs(60);
+const EXPIRE_BUFFER: Duration = Duration::from_hours(1);
+const CLI_TIMEOUT: Duration = Duration::from_mins(1);
 
 pub async fn refresh_access_token(
     auth: &ClaudeCodeAuthProvider,
