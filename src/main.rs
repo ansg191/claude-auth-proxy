@@ -1,7 +1,6 @@
 mod config;
 mod error;
 mod install;
-
 use std::{sync::Arc, time::Duration};
 
 use axum::{
@@ -17,7 +16,7 @@ use claude_auth_providers::{AnyAuthProvider, ClaudeAuthProvider};
 use claude_auth_transform::{TransformContext, transform_request, transform_response};
 use http_body_util::BodyExt;
 use reqwest::Client;
-use tokio::signal;
+use tokio::{io::AsyncWriteExt, signal};
 use tracing::{debug, info, warn};
 
 use crate::{config::ServerConfig, error::AppError};
@@ -75,6 +74,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(config: ServerConfig) -> anyhow::Result<()> {
+    if let Some(dump_req_dir) = &config.dump_req_dir {
+        warn!(
+            dump_req_dir = %dump_req_dir.display(),
+            "Request dumping is enabled for debugging and may grow disk usage over time"
+        );
+    }
+
     tracing::info!(
         host = %config.host,
         port = config.port,
@@ -206,6 +212,11 @@ async fn messages_handler(
         &token,
         &state.transform,
     )?;
+
+    if let Err(e) = dump_request(&req, &state).await {
+        warn!(error = %e, "Failed to dump request");
+    }
+
     let (tx_parts, tx_body) = req.into_parts();
     debug!("Forwarding request: {} {}", tx_parts.method, tx_parts.uri);
 
@@ -233,6 +244,41 @@ async fn messages_handler(
 
     // Wrap through ClaudeBody to strip tool prefixes from SSE events
     Ok(transform_response(response, state.transform.tool_name_mapper()).map(Body::new))
+}
+
+async fn dump_request(
+    req: &http::Request<Vec<u8>>,
+    state: &ServerState,
+) -> Result<(), std::io::Error> {
+    let Some(dump_path) = state.config.dump_req_dir.clone() else {
+        return Ok(());
+    };
+
+    let id = req
+        .headers()
+        .get("x-client-request-id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Missing x-client-request-id header for request dump filename",
+            )
+        })?;
+
+    let filename = format!("req_{id}.txt");
+    let path = dump_path.join(filename);
+    let mut file = tokio::fs::File::create(path).await?;
+
+    file.write_all(format!("{} {}\r\n", req.method(), req.uri()).as_bytes())
+        .await?;
+    for (name, value) in req.headers() {
+        file.write_all(
+            format!("{}: {}\r\n", name, value.to_str().unwrap_or("<binary>")).as_bytes(),
+        )
+        .await?;
+    }
+    file.write_all(b"\r\n").await?;
+    file.write_all(req.body()).await
 }
 
 /// When upstream returns 401 Unauthorized, attempt a forced credential
