@@ -204,7 +204,7 @@ async fn messages_handler(
         &state.transform,
     )?;
 
-    if let Err(e) = dump_request(&req, &state) {
+    if let Err(e) = dump_request(&req, &state).await {
         warn!(error = %e, "Failed to dump request");
     }
 
@@ -237,42 +237,51 @@ async fn messages_handler(
     Ok(transform_response(response).map(Body::new))
 }
 
-fn dump_request(
+async fn dump_request(
     req: &http::Request<Vec<u8>>,
-    state: &Arc<ServerState>,
+    state: &ServerState,
 ) -> Result<(), std::io::Error> {
-    let Some(dump_path) = &state.config.dump_req_dir else {
+    let Some(dump_path) = state.config.dump_req_dir.clone() else {
         return Ok(());
     };
 
-    let id = req
-        .headers()
-        .get("x-client-request-id")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Missing x-client-request-id header for request dump filename",
-        ))?;
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let headers = req.headers().clone();
+    let body = req.body().clone();
 
-    let filename = format!("req_{}.txt", id);
-    let path = dump_path.join(filename);
+    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        let id = headers
+            .get("x-client-request-id")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Missing x-client-request-id header for request dump filename",
+                )
+            })?;
 
-    let mut file = std::fs::File::create(path)?;
+        let filename = format!("req_{id}.txt");
+        let path = dump_path.join(filename);
 
-    write!(file, "{} {}\r\n", req.method(), req.uri())?;
-    for (name, value) in req.headers() {
-        write!(
-            file,
-            "{}: {}\r\n",
-            name,
-            value.to_str().unwrap_or("<binary>")
-        )?;
-    }
-    write!(file, "\r\n")?;
+        let mut file = std::fs::File::create(path)?;
 
-    file.write_all(req.body())?;
+        write!(file, "{method} {uri}\r\n")?;
+        for (name, value) in &headers {
+            write!(
+                file,
+                "{}: {}\r\n",
+                name,
+                value.to_str().unwrap_or("<binary>")
+            )?;
+        }
+        write!(file, "\r\n")?;
+        file.write_all(&body)?;
 
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| std::io::Error::other(format!("request dump task failed: {e}")))?
 }
 
 /// When upstream returns 401 Unauthorized, attempt a forced credential
