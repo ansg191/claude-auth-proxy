@@ -23,7 +23,7 @@ use crate::{config::ServerConfig, error::AppError};
 
 /// Upper bound on honoring a `Retry-After` response header. Protects against a
 /// misbehaving upstream asking the proxy to stall for hours.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+const MAX_RETRY_AFTER: Duration = Duration::from_mins(1);
 
 #[derive(Debug)]
 struct ServerState {
