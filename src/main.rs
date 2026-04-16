@@ -282,6 +282,7 @@ async fn dump_request(
     })
     .await
     .map_err(|e| std::io::Error::other(format!("request dump task failed: {e}")))?
+    .map_err(|e| std::io::Error::new(e.kind(), format!("request dump I/O failed: {e}")))
 }
 
 /// When upstream returns 401 Unauthorized, attempt a forced credential
