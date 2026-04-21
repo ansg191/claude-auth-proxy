@@ -36,8 +36,6 @@ RUN set -e; \
     fi; \
     cat /tmp/target.txt
 
-ENV TARGET_TRIPLE="$(cat /tmp/target.txt)"
-
 # Install cross-compilation target
 RUN rustup target add "$(cat /tmp/target.txt)"
 
