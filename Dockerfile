@@ -67,29 +67,14 @@ RUN set -e; \
 
 WORKDIR /app
 
-# Cache deps
-RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
-    --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
-    --mount=type=bind,source=claude-auth-providers/Cargo.toml,target=claude-auth-providers/Cargo.toml \
-    --mount=type=bind,source=claude-auth-transform/Cargo.toml,target=claude-auth-transform/Cargo.toml \
-    --mount=type=cache,target=/app/target/,id=cargo-target-${TARGETPLATFORM},sharing=private \
-    --mount=type=cache,target=/usr/local/cargo/registry/,id=cargo-registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git/db,id=cargo-git,sharing=locked \
-    TT="$(cat /tmp/target.txt)" && \
-    mkdir -p src claude-auth-providers/src claude-auth-transform/src && \
-    echo 'fn main() {}' > src/main.rs && \
-    echo 'fn main() {}' > claude-auth-providers/src/lib.rs && \
-    echo 'fn main() {}' > claude-auth-transform/src/lib.rs && \
-    cargo build --locked --release --target "$TT" 2>/dev/null || true
-
-# Actually build
+# Build
 RUN --mount=type=bind,source=src,target=src \
     --mount=type=bind,source=claude-auth-providers/src,target=claude-auth-providers/src \
     --mount=type=bind,source=claude-auth-transform/src,target=claude-auth-transform/src \
     --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
-    --mount=type=bind,source=claude-auth-providers/Cargo.toml,target=claude-auth-providers/Cargo.toml,ro=false \
-    --mount=type=bind,source=claude-auth-transform/Cargo.toml,target=claude-auth-transform/Cargo.toml,ro=false \
+    --mount=type=bind,source=claude-auth-providers/Cargo.toml,target=claude-auth-providers/Cargo.toml \
+    --mount=type=bind,source=claude-auth-transform/Cargo.toml,target=claude-auth-transform/Cargo.toml \
     --mount=type=cache,target=/app/target/,id=cargo-target-${TARGETPLATFORM},sharing=private \
     --mount=type=cache,target=/usr/local/cargo/registry/,id=cargo-registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db,id=cargo-git,sharing=locked \
