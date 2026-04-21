@@ -16,12 +16,17 @@ static TOOL_PREFIX_RE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r#""name"\s*:\s*"(t_[0-9a-f]+)""#).unwrap());
 
 pub fn transform_response<B>(
-    response: Response<B>,
+    mut response: Response<B>,
     tool_name_mapper: Arc<ToolNameMapper>,
 ) -> Response<ClaudeBody<B>>
 where
     B: Body,
 {
+    // Remove stale headers
+    let headers = response.headers_mut();
+    headers.remove("Content-Length");
+    headers.remove("Transfer-Encoding");
+
     response.map(|body| ClaudeBody {
         inner: body,
         buffer: BytesMut::new(),
@@ -206,5 +211,57 @@ mod tests {
     #[test]
     fn find_double_newline_none_when_absent() {
         assert_eq!(find_double_newline(b"data: hello\ndata: world"), None);
+    }
+
+    /// Regression test: upstream responses carry a `Content-Length` (and
+    /// sometimes `Transfer-Encoding`) matching the pre-transform body. Because
+    /// `strip_tool_prefix` rewrites `"name":"t_<hash>"` to `"name": "<real>"`,
+    /// the transformed body length changes. If we forwarded the stale header,
+    /// hyper would truncate the body on the wire and clients would see an
+    /// unterminated JSON string. `transform_response` must strip both headers
+    /// so hyper frames the transformed body with chunked transfer encoding.
+    #[tokio::test]
+    async fn transform_response_strips_stale_length_headers_and_deobfuscates_body() {
+        use http::Response;
+        use http_body_util::{BodyExt, Full};
+
+        let mapper = Arc::new(ToolNameMapper::new(8, 16));
+        let obfuscated = mapper.obfuscate("kubernetes_tabular_query");
+        let upstream_body = format!(r#"{{"name":"{obfuscated}"}}"#);
+        let upstream_len = upstream_body.len();
+
+        let response = Response::builder()
+            .header("content-length", upstream_len.to_string())
+            .header("transfer-encoding", "chunked")
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(upstream_body)))
+            .unwrap();
+
+        let out = transform_response(response, mapper);
+
+        assert!(
+            out.headers().get("content-length").is_none(),
+            "content-length must be stripped; otherwise hyper truncates the body"
+        );
+        assert!(
+            out.headers().get("transfer-encoding").is_none(),
+            "transfer-encoding must be stripped; it's hop-by-hop per RFC 7230"
+        );
+        assert_eq!(
+            out.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+
+        let collected = out.into_body().collect().await.unwrap().to_bytes();
+        let body_str = std::str::from_utf8(&collected).unwrap();
+        assert_eq!(body_str, r#"{"name": "kubernetes_tabular_query"}"#);
+
+        assert!(
+            collected.len() > upstream_len,
+            "transformed body ({} bytes) must exceed stale content-length ({} bytes) \
+             for this regression to be meaningful",
+            collected.len(),
+            upstream_len,
+        );
     }
 }
