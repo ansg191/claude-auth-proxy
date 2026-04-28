@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use tracing::{debug, trace};
+use tracing::{info, trace};
 
 use crate::{
     Error, TransformConfig,
@@ -19,7 +19,7 @@ pub fn transform_body(
     tool_name_mapper: &ToolNameMapper,
 ) -> Result<Vec<u8>, Error> {
     let Ok(mut parsed): Result<MessageBody, _> = serde_json::from_slice(bytes) else {
-        debug!("Failed to parse body, skipping transformation");
+        info!("Failed to parse body, skipping transformation");
         return Ok(bytes.to_vec());
     };
 
@@ -359,6 +359,48 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("t_")
+        );
+    }
+
+    #[test]
+    fn transform_body_normalizes_string_form_system_and_runs_full_pipeline() {
+        let input = json!({
+            "system": "You are a helpful assistant tasked with performing arithmetic on a set of inputs.",
+            "tools": [{ "name": "add" }],
+            "messages": [{ "role": "user", "content": "Add 3 and 4." }]
+        });
+
+        let parsed = run_transform(input);
+
+        let system = parsed["system"].as_array().unwrap();
+        assert_eq!(system.len(), 2, "system: {parsed:#}");
+        assert!(
+            system[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("x-anthropic-billing-header:")
+        );
+        assert_eq!(
+            system[1]["text"],
+            "You are Claude Code, Anthropic's official CLI for Claude."
+        );
+
+        let user_text = parsed["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            user_text.contains("You are a helpful assistant tasked with performing arithmetic"),
+            "user message did not absorb relocated system text: {user_text}"
+        );
+        assert!(
+            user_text.contains("Add 3 and 4."),
+            "user message lost original content: {user_text}"
+        );
+
+        assert!(
+            parsed["tools"][0]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("t_"),
+            "tool name was not obfuscated: {parsed:#}"
         );
     }
 
