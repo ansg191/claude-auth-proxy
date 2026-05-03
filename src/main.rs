@@ -186,6 +186,10 @@ async fn messages_handler(
         .cloned()
         .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
 
+    // Append `beta=true` to `/v1/messages` requests when not already present,
+    // matching the query string that Claude Code 2.1.112+ sends.
+    let path_and_query = append_beta_query(path_and_query);
+
     parts.uri = http::uri::Builder::new()
         .scheme("https")
         .authority("api.anthropic.com")
@@ -449,6 +453,24 @@ fn retry_delay(attempt: u32, headers: &reqwest::header::HeaderMap) -> Duration {
     header_delay.unwrap_or_else(|| Duration::from_secs(u64::from(attempt + 1) * 2))
 }
 
+/// Append `beta=true` to the query string when the path is `/v1/messages`
+/// and the query does not already contain `beta=true`.
+fn append_beta_query(pq: http::uri::PathAndQuery) -> http::uri::PathAndQuery {
+    if pq.path() != "/v1/messages" {
+        return pq;
+    }
+    let query = pq.query().unwrap_or("");
+    if query.split('&').any(|pair| pair == "beta=true") {
+        return pq;
+    }
+    let new_pq = if query.is_empty() {
+        "/v1/messages?beta=true".to_owned()
+    } else {
+        format!("/v1/messages?{query}&beta=true")
+    };
+    http::uri::PathAndQuery::try_from(new_pq).unwrap_or(pq)
+}
+
 #[cfg(test)]
 mod tests {
     use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
@@ -506,5 +528,39 @@ mod tests {
         assert_eq!(retry_delay(0, &headers), Duration::from_secs(2));
         assert_eq!(retry_delay(1, &headers), Duration::from_secs(4));
         assert_eq!(retry_delay(2, &headers), Duration::from_secs(6));
+    }
+
+    fn pq(s: &'static str) -> http::uri::PathAndQuery {
+        http::uri::PathAndQuery::from_static(s)
+    }
+
+    #[test]
+    fn append_beta_query_adds_beta_to_messages() {
+        let result = append_beta_query(pq("/v1/messages"));
+        assert_eq!(result.as_str(), "/v1/messages?beta=true");
+    }
+
+    #[test]
+    fn append_beta_query_appends_to_existing_query() {
+        let result = append_beta_query(pq("/v1/messages?foo=bar"));
+        assert_eq!(result.as_str(), "/v1/messages?foo=bar&beta=true");
+    }
+
+    #[test]
+    fn append_beta_query_skips_when_already_present() {
+        let result = append_beta_query(pq("/v1/messages?beta=true"));
+        assert_eq!(result.as_str(), "/v1/messages?beta=true");
+    }
+
+    #[test]
+    fn append_beta_query_skips_when_present_with_other_params() {
+        let result = append_beta_query(pq("/v1/messages?foo=bar&beta=true"));
+        assert_eq!(result.as_str(), "/v1/messages?foo=bar&beta=true");
+    }
+
+    #[test]
+    fn append_beta_query_ignores_non_messages_paths() {
+        let result = append_beta_query(pq("/v1/models"));
+        assert_eq!(result.as_str(), "/v1/models");
     }
 }
