@@ -257,7 +257,7 @@ fn set_stainless_headers(headers: &mut HeaderMap) {
             .or_insert_with(|| HeaderValue::from_static(value));
     }
 
-    // Dynamic headers — build from runtime constants and insert if absent.
+    // Dynamic headers: build from runtime constants and insert if absent.
     headers
         .entry("x-stainless-os")
         .or_insert_with(|| HeaderValue::from_static(os));
