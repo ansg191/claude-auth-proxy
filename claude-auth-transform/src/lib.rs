@@ -31,10 +31,10 @@ pub const DEFAULT_CC_VERSION: &str = config::CONFIG.cc_version;
 pub struct TransformConfig {
     /// CLI version string (from `ANTHROPIC_CLI_VERSION`, default `ModelConfig.cc_version`).
     pub cc_version: String,
-    /// Entrypoint identifier (from `CLAUDE_CODE_ENTRYPOINT`, default `"cli"`).
+    /// Entrypoint identifier (from `CLAUDE_CODE_ENTRYPOINT`, default `"sdk-cli"`).
     pub entrypoint: String,
     /// Full user-agent override (from `ANTHROPIC_USER_AGENT`). When `None`,
-    /// computed as `"claude-cli/{cc_version} (external, cli)"`.
+    /// computed as `"claude-cli/{cc_version} (external, sdk-cli)"`.
     pub user_agent_override: Option<String>,
     /// Resolved base beta flags. When `ANTHROPIC_BETA_FLAGS` is set, this
     /// holds the parsed override; otherwise it holds `ModelConfig.base_betas`.
@@ -52,7 +52,7 @@ impl Default for TransformConfig {
     fn default() -> Self {
         Self {
             cc_version: config::CONFIG.cc_version.to_owned(),
-            entrypoint: "cli".to_owned(),
+            entrypoint: "sdk-cli".to_owned(),
             user_agent_override: None,
             base_betas: config::CONFIG
                 .base_betas
@@ -109,7 +109,7 @@ impl TransformContext {
             .map_or_else(
                 || {
                     HeaderValue::from_str(&format!(
-                        "claude-cli/{} (external, cli)",
+                        "claude-cli/{} (external, sdk-cli)",
                         config.cc_version
                     ))
                 },
@@ -206,6 +206,10 @@ fn build_request_headers(
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     headers.insert("anthropic-beta", merged_betas);
     headers.insert("x-app", HeaderValue::from_static("cli"));
+    headers.insert(
+        "anthropic-dangerous-direct-browser-access",
+        HeaderValue::from_static("true"),
+    );
     headers.insert("user-agent", ctx.user_agent.clone());
     headers.insert(
         "x-client-request-id",
@@ -215,6 +219,49 @@ fn build_request_headers(
         "X-Claude-Code-Session-Id",
         HeaderValue::from_str(&ctx.config.session_id).map_err(Error::InvalidSessionId)?,
     );
+    // Set stainless SDK fingerprint headers if not already provided by the caller.
+    set_stainless_headers(headers);
     headers.remove("x-api-key");
     Ok(())
+}
+
+/// Populate the stainless SDK telemetry headers that the Anthropic Node.js SDK
+/// sends with every request. Only sets headers that are not already present so
+/// that callers can override individual values.
+fn set_stainless_headers(headers: &mut HeaderMap) {
+    let os = match std::env::consts::OS {
+        "macos" => "MacOS",
+        "windows" => "Windows",
+        "linux" => "Linux",
+        _ => "Unknown",
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        "x86" => "x32",
+        a => a,
+    };
+
+    let stainless: &[(&str, &str)] = &[
+        ("x-stainless-lang", "js"),
+        ("x-stainless-runtime", "node"),
+        ("x-stainless-runtime-version", "v22.14.0"),
+        ("x-stainless-package-version", "0.52.0"),
+        ("x-stainless-retry-count", "0"),
+        ("x-stainless-timeout", "600000"),
+    ];
+
+    for (name, value) in stainless {
+        headers
+            .entry(*name)
+            .or_insert_with(|| HeaderValue::from_static(value));
+    }
+
+    // Dynamic headers: build from runtime constants and insert if absent.
+    headers
+        .entry("x-stainless-os")
+        .or_insert_with(|| HeaderValue::from_static(os));
+    headers
+        .entry("x-stainless-arch")
+        .or_insert_with(|| HeaderValue::from_static(arch));
 }

@@ -94,7 +94,7 @@ pub struct TransformArgs {
     #[arg(
         long = "entrypoint",
         env = "CLAUDE_CODE_ENTRYPOINT",
-        default_value = "cli"
+        default_value = "sdk-cli"
     )]
     pub entrypoint: String,
 
