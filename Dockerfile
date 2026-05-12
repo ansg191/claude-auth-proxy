@@ -23,6 +23,13 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev
 
+# Install cargo-auditable so the release binary embeds a compressed
+# dependency manifest in a .dep-v0 ELF section. Syft (BuildKit's SBOM
+# scanner) and Trivy both read this to enumerate Rust crates inside
+# the otherwise opaque distroless image.
+RUN --mount=type=cache,target=/usr/local/cargo/registry/,id=cargo-registry,sharing=locked \
+    cargo install --locked cargo-auditable
+
 # Determine target triple and set up cross-compilation
 RUN set -e; \
     if [ -n "$TARGET_TRIPLE" ]; then \
@@ -77,7 +84,7 @@ RUN --mount=type=bind,source=src,target=src \
     --mount=type=cache,target=/usr/local/cargo/registry/,id=cargo-registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db,id=cargo-git,sharing=locked \
     TT="$(cat /tmp/target.txt)" && \
-    cargo build --locked --release --target "$TT" && \
+    cargo auditable build --locked --release --target "$TT" && \
     cp "/app/target/$TT/release/$APP_NAME" /bin/server
 
 ################################################################################
