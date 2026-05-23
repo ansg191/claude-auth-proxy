@@ -6,6 +6,13 @@ use crate::claude_code::credential::{ClaudeCredential, parse_credentials};
 
 /// Environment variable that overrides the default credentials file path.
 const CREDENTIALS_FILE_ENV: &str = "CLAUDE_CREDENTIALS_FILE";
+#[cfg(test)]
+static TEST_CREDENTIALS_FILE_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub fn set_test_credentials_file_path(path: Option<PathBuf>) {
+    *TEST_CREDENTIALS_FILE_PATH.lock().expect("Poisoned Lock") = path;
+}
 
 /// Reads Claude Code credentials from `~/.claude/.credentials.json` (or the
 /// path specified by `CLAUDE_CREDENTIALS_FILE`).
@@ -46,6 +53,17 @@ fn load_from(path: &Path) -> Vec<ClaudeCredential> {
 }
 
 fn credentials_file_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        let test_override = TEST_CREDENTIALS_FILE_PATH
+            .lock()
+            .expect("Poisoned Lock")
+            .clone();
+        if let Some(path) = test_override {
+            return Some(path);
+        }
+    }
+
     if let Ok(path) = std::env::var(CREDENTIALS_FILE_ENV)
         && !path.is_empty()
     {

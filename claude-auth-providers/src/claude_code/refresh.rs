@@ -173,11 +173,12 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use crate::ClaudeAuthProvider;
+    use crate::{ClaudeAuthProvider, claude_code::credentials_file};
 
     use super::*;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const TEST_TIMING_BUFFER: Duration = Duration::from_millis(20);
 
     fn now_epoch_secs() -> u64 {
         SystemTime::now()
@@ -219,7 +220,7 @@ mod tests {
         ));
 
         write_credentials_file(&path, "old_access", "old_refresh", now_epoch_secs() + 7200);
-        unsafe { std::env::set_var("CLAUDE_CREDENTIALS_FILE", &path) };
+        credentials_file::set_test_credentials_file_path(Some(path.clone()));
 
         let auth = ClaudeCodeAuthProvider::new();
         let runtime = runtime();
@@ -231,7 +232,7 @@ mod tests {
         );
 
         write_credentials_file(&path, "new_access", "new_refresh", now_epoch_secs() + 7200);
-        std::thread::sleep(FILE_RELOAD_TTL + Duration::from_millis(5));
+        std::thread::sleep(FILE_RELOAD_TTL + TEST_TIMING_BUFFER);
 
         assert_eq!(
             runtime
@@ -240,7 +241,7 @@ mod tests {
             "new_access"
         );
 
-        unsafe { std::env::remove_var("CLAUDE_CREDENTIALS_FILE") };
+        credentials_file::set_test_credentials_file_path(None);
         let _ = fs::remove_file(&path);
     }
 
@@ -261,7 +262,7 @@ mod tests {
             "fresh_refresh",
             now_epoch_secs() + 7200,
         );
-        unsafe { std::env::set_var("CLAUDE_CREDENTIALS_FILE", &path) };
+        credentials_file::set_test_credentials_file_path(Some(path.clone()));
 
         let auth = ClaudeCodeAuthProvider::new();
         {
@@ -289,7 +290,7 @@ mod tests {
             "fresh_access"
         );
 
-        unsafe { std::env::remove_var("CLAUDE_CREDENTIALS_FILE") };
+        credentials_file::set_test_credentials_file_path(None);
         let _ = fs::remove_file(&path);
     }
 }
