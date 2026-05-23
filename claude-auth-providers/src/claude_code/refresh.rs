@@ -6,7 +6,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     Error,
-    claude_code::{ClaudeCodeAuthProvider, credential::ClaudeCredential},
+    claude_code::{ClaudeCodeAuthProvider, credential::ClaudeCredential, credentials_file},
 };
 
 const OAUTH_TOKEN_URL: &str = "https://claude.ai/v1/oauth/token";
@@ -24,16 +24,16 @@ pub async fn refresh_access_token(
     mut creds: ClaudeCredential,
     force: bool,
 ) -> Result<ClaudeCredential, Error> {
-    if maybe_reload_credentials(auth)
-        && let Some(reloaded) = auth.get_active_credential()
-    {
+    if let Some(reloaded) = maybe_reload_credentials(auth) {
         if reloaded.expires_at >= creds.expires_at {
             creds = reloaded;
-        } else {
-            let mut creds_guard = auth.creds.write().expect("Poisoned Lock");
-            *creds_guard
-                .get_mut(auth.active)
-                .expect("Active credential index out of bounds") = creds.clone();
+        }
+
+        let mut creds_guard = auth.creds.write().expect("Poisoned Lock");
+        if let Some(active) = creds_guard.get_mut(auth.active) {
+            *active = creds.clone();
+        } else if auth.active == creds_guard.len() {
+            creds_guard.push(creds.clone());
         }
     }
 
@@ -63,18 +63,16 @@ pub async fn refresh_access_token(
     refresh_cli(auth).await
 }
 
-fn maybe_reload_credentials(auth: &ClaudeCodeAuthProvider) -> bool {
-    let should_reload = auth
-        .last_reload_at
-        .lock()
-        .expect("Poisoned Lock")
-        .is_none_or(|last| last.elapsed() >= FILE_RELOAD_TTL);
-
-    if should_reload {
-        auth.reload();
+fn maybe_reload_credentials(auth: &ClaudeCodeAuthProvider) -> Option<ClaudeCredential> {
+    let mut last_reload_at = auth.last_reload_at.lock().expect("Poisoned Lock");
+    let should_reload = last_reload_at.is_none_or(|last| last.elapsed() >= FILE_RELOAD_TTL);
+    if !should_reload {
+        return None;
     }
+    *last_reload_at = Some(std::time::Instant::now());
+    drop(last_reload_at);
 
-    should_reload
+    credentials_file::get_credentials().into_iter().next()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,15 +174,14 @@ mod tests {
     use std::{
         fs,
         io::Write,
-        sync::Mutex,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use crate::{ClaudeAuthProvider, claude_code::credentials_file};
+    use crate::ClaudeAuthProvider;
 
     use super::*;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     const TEST_TIMING_BUFFER: Duration = Duration::from_millis(20);
     const TEST_TOKEN_EXPIRY_OFFSET: u64 = 7_200;
 
@@ -193,13 +190,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("System time before UNIX EPOCH")
             .as_secs()
-    }
-
-    fn runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("create tokio runtime")
     }
 
     fn write_credentials_file(
@@ -216,9 +206,9 @@ mod tests {
         .expect("write credentials file");
     }
 
-    #[test]
-    fn observes_external_credentials_file_update() {
-        let _guard = ENV_LOCK.lock().expect("Poisoned Lock");
+    #[tokio::test(flavor = "current_thread")]
+    async fn observes_external_credentials_file_update() {
+        let _guard = ENV_LOCK.lock().await;
 
         let mut path = std::env::temp_dir();
         path.push(format!(
@@ -236,11 +226,8 @@ mod tests {
         credentials_file::set_test_credentials_file_path(Some(path.clone()));
 
         let auth = ClaudeCodeAuthProvider::new();
-        let runtime = runtime();
         assert_eq!(
-            runtime
-                .block_on(auth.get_access_token())
-                .expect("first token"),
+            auth.get_access_token().await.expect("first token"),
             "old_access"
         );
 
@@ -253,9 +240,7 @@ mod tests {
         std::thread::sleep(FILE_RELOAD_TTL + TEST_TIMING_BUFFER);
 
         assert_eq!(
-            runtime
-                .block_on(auth.get_access_token())
-                .expect("reloaded token"),
+            auth.get_access_token().await.expect("reloaded token"),
             "new_access"
         );
 
@@ -263,9 +248,9 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    #[test]
-    fn skips_oauth_refresh_when_disk_credentials_are_fresh() {
-        let _guard = ENV_LOCK.lock().expect("Poisoned Lock");
+    #[tokio::test(flavor = "current_thread")]
+    async fn skips_oauth_refresh_when_disk_credentials_are_fresh() {
+        let _guard = ENV_LOCK.lock().await;
 
         let mut path = std::env::temp_dir();
         path.push(format!(
@@ -295,9 +280,8 @@ mod tests {
         *auth.last_reload_at.lock().expect("Poisoned Lock") = None;
 
         let stale = auth.get_active_credential().expect("stale credential");
-        let runtime = runtime();
-        let refreshed = runtime
-            .block_on(refresh_access_token(&auth, stale, false))
+        let refreshed = refresh_access_token(&auth, stale, false)
+            .await
             .expect("should use fresh disk credential");
 
         assert_eq!(refreshed.access_token, "fresh_access");
@@ -312,9 +296,9 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    #[test]
-    fn does_not_replace_fresher_in_memory_credential_with_stale_disk_credential() {
-        let _guard = ENV_LOCK.lock().expect("Poisoned Lock");
+    #[tokio::test(flavor = "current_thread")]
+    async fn does_not_replace_fresher_in_memory_credential_with_stale_disk_credential() {
+        let _guard = ENV_LOCK.lock().await;
 
         let mut path = std::env::temp_dir();
         path.push(format!(
@@ -339,9 +323,8 @@ mod tests {
         }
         *auth.last_reload_at.lock().expect("Poisoned Lock") = None;
 
-        let runtime = runtime();
-        let refreshed = runtime
-            .block_on(refresh_access_token(&auth, fresher, false))
+        let refreshed = refresh_access_token(&auth, fresher, false)
+            .await
             .expect("should keep fresher in-memory credential");
 
         assert_eq!(refreshed.access_token, "memory_access");
