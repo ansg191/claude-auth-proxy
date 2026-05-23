@@ -177,6 +177,7 @@ mod tests {
     use std::{
         fs,
         io::Write,
+        path::PathBuf,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -209,6 +210,24 @@ mod tests {
         .expect("write credentials file");
     }
 
+    struct TestCredentialsFileGuard {
+        path: PathBuf,
+    }
+
+    impl TestCredentialsFileGuard {
+        fn new(path: PathBuf) -> Self {
+            credentials_file::set_test_credentials_file_path(Some(path.clone()));
+            Self { path }
+        }
+    }
+
+    impl Drop for TestCredentialsFileGuard {
+        fn drop(&mut self) {
+            credentials_file::set_test_credentials_file_path(None);
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn observes_external_credentials_file_update() {
         let _guard = ENV_LOCK.lock().await;
@@ -226,7 +245,7 @@ mod tests {
             "old_refresh",
             now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
         );
-        credentials_file::set_test_credentials_file_path(Some(path.clone()));
+        let _file_guard = TestCredentialsFileGuard::new(path.clone());
 
         let auth = ClaudeCodeAuthProvider::new();
         assert_eq!(
@@ -246,9 +265,6 @@ mod tests {
             auth.get_access_token().await.expect("reloaded token"),
             "new_access"
         );
-
-        credentials_file::set_test_credentials_file_path(None);
-        let _ = fs::remove_file(&path);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -268,7 +284,7 @@ mod tests {
             "fresh_refresh",
             now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
         );
-        credentials_file::set_test_credentials_file_path(Some(path.clone()));
+        let _file_guard = TestCredentialsFileGuard::new(path.clone());
 
         let auth = ClaudeCodeAuthProvider::new();
         {
@@ -294,9 +310,6 @@ mod tests {
                 .access_token,
             "fresh_access"
         );
-
-        credentials_file::set_test_credentials_file_path(None);
-        let _ = fs::remove_file(&path);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -311,7 +324,7 @@ mod tests {
         ));
 
         write_credentials_file(&path, "disk_access", "disk_refresh", now_epoch_secs() + 100);
-        credentials_file::set_test_credentials_file_path(Some(path.clone()));
+        let _file_guard = TestCredentialsFileGuard::new(path.clone());
 
         let auth = ClaudeCodeAuthProvider::new();
         let fresher = ClaudeCredential {
@@ -337,8 +350,5 @@ mod tests {
                 .access_token,
             "memory_access"
         );
-
-        credentials_file::set_test_credentials_file_path(None);
-        let _ = fs::remove_file(&path);
     }
 }
