@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::RwLock};
+use std::{
+    collections::HashSet,
+    sync::{Mutex, RwLock},
+    time::Instant,
+};
 
 #[cfg(target_os = "macos")]
 use tracing::error;
@@ -14,6 +18,7 @@ mod refresh;
 #[derive(Debug)]
 pub struct ClaudeCodeAuthProvider {
     creds: RwLock<Vec<ClaudeCredential>>,
+    last_reload_at: Mutex<Option<Instant>>,
     active: usize,
 }
 
@@ -28,6 +33,7 @@ impl ClaudeCodeAuthProvider {
     pub fn new() -> Self {
         let this = Self {
             creds: RwLock::new(Vec::new()),
+            last_reload_at: Mutex::new(None),
             active: 0,
         };
         this.reload();
@@ -58,6 +64,7 @@ impl ClaudeCodeAuthProvider {
         creds.retain(|c| seen.insert(c.access_token.clone()));
 
         *self.creds.write().expect("Poisoned Lock") = creds;
+        *self.last_reload_at.lock().expect("Poisoned Lock") = Some(Instant::now());
     }
 
     fn get_active_credential(&self) -> Option<ClaudeCredential> {

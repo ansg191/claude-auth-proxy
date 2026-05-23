@@ -14,12 +14,22 @@ const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 const EXPIRE_BUFFER: Duration = Duration::from_hours(1);
 const CLI_TIMEOUT: Duration = Duration::from_mins(1);
+#[cfg(not(test))]
+const FILE_RELOAD_TTL: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const FILE_RELOAD_TTL: Duration = Duration::from_millis(1);
 
 pub async fn refresh_access_token(
     auth: &ClaudeCodeAuthProvider,
-    creds: ClaudeCredential,
+    mut creds: ClaudeCredential,
     force: bool,
 ) -> Result<ClaudeCredential, Error> {
+    if maybe_reload_credentials(auth)
+        && let Some(reloaded) = auth.get_active_credential()
+    {
+        creds = reloaded;
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("System time before UNIX EPOCH")
@@ -44,6 +54,20 @@ pub async fn refresh_access_token(
 
     // If that fails, try refreshing via the CLI
     refresh_cli(auth).await
+}
+
+fn maybe_reload_credentials(auth: &ClaudeCodeAuthProvider) -> bool {
+    let should_reload = auth
+        .last_reload_at
+        .lock()
+        .expect("Poisoned Lock")
+        .is_none_or(|last| last.elapsed() >= FILE_RELOAD_TTL);
+
+    if should_reload {
+        auth.reload();
+    }
+
+    should_reload
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,4 +162,134 @@ async fn refresh_cli(auth: &ClaudeCodeAuthProvider) -> Result<ClaudeCredential, 
     Err(Error::Refresh(
         "Failed to refresh access token via CLI".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        io::Write,
+        sync::Mutex,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::ClaudeAuthProvider;
+
+    use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn now_epoch_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time before UNIX EPOCH")
+            .as_secs()
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create tokio runtime")
+    }
+
+    fn write_credentials_file(
+        path: &std::path::Path,
+        access: &str,
+        refresh: &str,
+        expires_at: u64,
+    ) {
+        let mut file = fs::File::create(path).expect("create credentials file");
+        write!(
+            file,
+            r#"{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":{expires_at}}}"#
+        )
+        .expect("write credentials file");
+    }
+
+    #[test]
+    fn observes_external_credentials_file_update() {
+        let _guard = ENV_LOCK.lock().expect("Poisoned Lock");
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "claude-auth-proxy-refresh-external-{}-{}.json",
+            std::process::id(),
+            now_epoch_secs(),
+        ));
+
+        write_credentials_file(&path, "old_access", "old_refresh", now_epoch_secs() + 7200);
+        unsafe { std::env::set_var("CLAUDE_CREDENTIALS_FILE", &path) };
+
+        let auth = ClaudeCodeAuthProvider::new();
+        let runtime = runtime();
+        assert_eq!(
+            runtime
+                .block_on(auth.get_access_token())
+                .expect("first token"),
+            "old_access"
+        );
+
+        write_credentials_file(&path, "new_access", "new_refresh", now_epoch_secs() + 7200);
+        std::thread::sleep(FILE_RELOAD_TTL + Duration::from_millis(5));
+
+        assert_eq!(
+            runtime
+                .block_on(auth.get_access_token())
+                .expect("reloaded token"),
+            "new_access"
+        );
+
+        unsafe { std::env::remove_var("CLAUDE_CREDENTIALS_FILE") };
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn skips_oauth_refresh_when_disk_credentials_are_fresh() {
+        let _guard = ENV_LOCK.lock().expect("Poisoned Lock");
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "claude-auth-proxy-refresh-fresh-disk-{}-{}.json",
+            std::process::id(),
+            now_epoch_secs(),
+        ));
+
+        write_credentials_file(
+            &path,
+            "fresh_access",
+            "fresh_refresh",
+            now_epoch_secs() + 7200,
+        );
+        unsafe { std::env::set_var("CLAUDE_CREDENTIALS_FILE", &path) };
+
+        let auth = ClaudeCodeAuthProvider::new();
+        {
+            let mut guard = auth.creds.write().expect("Poisoned Lock");
+            guard[0] = ClaudeCredential {
+                access_token: "stale_access".into(),
+                refresh_token: Some("stale_refresh".into()),
+                expires_at: now_epoch_secs() + 10,
+                subscription_type: None,
+            };
+        }
+        *auth.last_reload_at.lock().expect("Poisoned Lock") = None;
+
+        let stale = auth.get_active_credential().expect("stale credential");
+        let runtime = runtime();
+        let refreshed = runtime
+            .block_on(refresh_access_token(&auth, stale, false))
+            .expect("should use fresh disk credential");
+
+        assert_eq!(refreshed.access_token, "fresh_access");
+        assert_eq!(
+            auth.get_active_credential()
+                .expect("active credential")
+                .access_token,
+            "fresh_access"
+        );
+
+        unsafe { std::env::remove_var("CLAUDE_CREDENTIALS_FILE") };
+        let _ = fs::remove_file(&path);
+    }
 }
