@@ -24,16 +24,13 @@ pub async fn refresh_access_token(
     mut creds: ClaudeCredential,
     force: bool,
 ) -> Result<ClaudeCredential, Error> {
-    if let Some(reloaded) = maybe_reload_credentials(auth) {
-        if reloaded.expires_at >= creds.expires_at {
-            creds = reloaded;
-        }
-
+    if let Some(reloaded) = maybe_reload_credentials(auth)
+        && reloaded.expires_at >= creds.expires_at
+    {
+        creds = reloaded;
         let mut creds_guard = auth.creds.write().expect("Poisoned Lock");
         if let Some(active) = creds_guard.get_mut(auth.active) {
             *active = creds.clone();
-        } else if auth.active == creds_guard.len() {
-            creds_guard.push(creds.clone());
         }
     }
 
@@ -64,15 +61,21 @@ pub async fn refresh_access_token(
 }
 
 fn maybe_reload_credentials(auth: &ClaudeCodeAuthProvider) -> Option<ClaudeCredential> {
-    let mut last_reload_at = auth.last_reload_at.lock().expect("Poisoned Lock");
-    let should_reload = last_reload_at.is_none_or(|last| last.elapsed() >= FILE_RELOAD_TTL);
+    let should_reload = auth
+        .last_reload_at
+        .lock()
+        .expect("Poisoned Lock")
+        .is_none_or(|last| last.elapsed() >= FILE_RELOAD_TTL);
     if !should_reload {
         return None;
     }
-    *last_reload_at = Some(std::time::Instant::now());
-    drop(last_reload_at);
 
-    credentials_file::get_credentials().into_iter().next()
+    let Some(reloaded) = credentials_file::get_credentials().into_iter().next() else {
+        debug!("No file-backed credential found during refresh-path reload");
+        return None;
+    };
+    *auth.last_reload_at.lock().expect("Poisoned Lock") = Some(std::time::Instant::now());
+    Some(reloaded)
 }
 
 #[derive(Debug, Clone, Deserialize)]
