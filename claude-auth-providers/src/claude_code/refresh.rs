@@ -27,7 +27,14 @@ pub async fn refresh_access_token(
     if maybe_reload_credentials(auth)
         && let Some(reloaded) = auth.get_active_credential()
     {
-        creds = reloaded;
+        if reloaded.expires_at >= creds.expires_at {
+            creds = reloaded;
+        } else {
+            let mut creds_guard = auth.creds.write().expect("Poisoned Lock");
+            *creds_guard
+                .get_mut(auth.active)
+                .expect("Active credential index out of bounds") = creds.clone();
+        }
     }
 
     let now = std::time::SystemTime::now()
@@ -179,6 +186,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     const TEST_TIMING_BUFFER: Duration = Duration::from_millis(20);
+    const TEST_TOKEN_EXPIRY_OFFSET: u64 = 7_200;
 
     fn now_epoch_secs() -> u64 {
         SystemTime::now()
@@ -219,7 +227,12 @@ mod tests {
             now_epoch_secs(),
         ));
 
-        write_credentials_file(&path, "old_access", "old_refresh", now_epoch_secs() + 7200);
+        write_credentials_file(
+            &path,
+            "old_access",
+            "old_refresh",
+            now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
+        );
         credentials_file::set_test_credentials_file_path(Some(path.clone()));
 
         let auth = ClaudeCodeAuthProvider::new();
@@ -231,7 +244,12 @@ mod tests {
             "old_access"
         );
 
-        write_credentials_file(&path, "new_access", "new_refresh", now_epoch_secs() + 7200);
+        write_credentials_file(
+            &path,
+            "new_access",
+            "new_refresh",
+            now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
+        );
         std::thread::sleep(FILE_RELOAD_TTL + TEST_TIMING_BUFFER);
 
         assert_eq!(
@@ -260,7 +278,7 @@ mod tests {
             &path,
             "fresh_access",
             "fresh_refresh",
-            now_epoch_secs() + 7200,
+            now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
         );
         credentials_file::set_test_credentials_file_path(Some(path.clone()));
 
@@ -288,6 +306,50 @@ mod tests {
                 .expect("active credential")
                 .access_token,
             "fresh_access"
+        );
+
+        credentials_file::set_test_credentials_file_path(None);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn does_not_replace_fresher_in_memory_credential_with_stale_disk_credential() {
+        let _guard = ENV_LOCK.lock().expect("Poisoned Lock");
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "claude-auth-proxy-refresh-stale-disk-{}-{}.json",
+            std::process::id(),
+            now_epoch_secs(),
+        ));
+
+        write_credentials_file(&path, "disk_access", "disk_refresh", now_epoch_secs() + 100);
+        credentials_file::set_test_credentials_file_path(Some(path.clone()));
+
+        let auth = ClaudeCodeAuthProvider::new();
+        let fresher = ClaudeCredential {
+            access_token: "memory_access".into(),
+            refresh_token: Some("memory_refresh".into()),
+            expires_at: now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
+            subscription_type: None,
+        };
+        {
+            let mut guard = auth.creds.write().expect("Poisoned Lock");
+            guard[0] = fresher.clone();
+        }
+        *auth.last_reload_at.lock().expect("Poisoned Lock") = None;
+
+        let runtime = runtime();
+        let refreshed = runtime
+            .block_on(refresh_access_token(&auth, fresher, false))
+            .expect("should keep fresher in-memory credential");
+
+        assert_eq!(refreshed.access_token, "memory_access");
+        assert_eq!(
+            auth.get_active_credential()
+                .expect("active credential")
+                .access_token,
+            "memory_access"
         );
 
         credentials_file::set_test_credentials_file_path(None);
