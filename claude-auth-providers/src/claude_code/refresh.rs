@@ -6,7 +6,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     Error,
-    claude_code::{ClaudeCodeAuthProvider, credential::ClaudeCredential},
+    claude_code::{ClaudeCodeAuthProvider, credential::ClaudeCredential, credentials_file},
 };
 
 const OAUTH_TOKEN_URL: &str = "https://claude.ai/v1/oauth/token";
@@ -14,12 +14,26 @@ const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 const EXPIRE_BUFFER: Duration = Duration::from_hours(1);
 const CLI_TIMEOUT: Duration = Duration::from_mins(1);
+#[cfg(not(test))]
+const FILE_RELOAD_TTL: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const FILE_RELOAD_TTL: Duration = Duration::from_millis(1);
 
 pub async fn refresh_access_token(
     auth: &ClaudeCodeAuthProvider,
-    creds: ClaudeCredential,
+    mut creds: ClaudeCredential,
     force: bool,
 ) -> Result<ClaudeCredential, Error> {
+    if let Some(reloaded) = maybe_reload_credentials(auth)
+        && reloaded.expires_at >= creds.expires_at
+    {
+        creds = reloaded;
+        let mut creds_guard = auth.creds.write().expect("Poisoned Lock");
+        if let Some(active) = creds_guard.get_mut(auth.active) {
+            *active = creds.clone();
+        }
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("System time before UNIX EPOCH")
@@ -44,6 +58,24 @@ pub async fn refresh_access_token(
 
     // If that fails, try refreshing via the CLI
     refresh_cli(auth).await
+}
+
+fn maybe_reload_credentials(auth: &ClaudeCodeAuthProvider) -> Option<ClaudeCredential> {
+    let should_reload = auth
+        .last_reload_at
+        .lock()
+        .expect("Poisoned Lock")
+        .is_none_or(|last| last.elapsed() >= FILE_RELOAD_TTL);
+    if !should_reload {
+        return None;
+    }
+
+    let Some(reloaded) = credentials_file::get_credentials().into_iter().next() else {
+        debug!("No file-backed credential found during refresh-path reload");
+        return None;
+    };
+    *auth.last_reload_at.lock().expect("Poisoned Lock") = Some(std::time::Instant::now());
+    Some(reloaded)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,4 +170,185 @@ async fn refresh_cli(auth: &ClaudeCodeAuthProvider) -> Result<ClaudeCredential, 
     Err(Error::Refresh(
         "Failed to refresh access token via CLI".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        io::Write,
+        path::PathBuf,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::ClaudeAuthProvider;
+
+    use super::*;
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    const TEST_TIMING_BUFFER: Duration = Duration::from_millis(20);
+    const TEST_TOKEN_EXPIRY_OFFSET: u64 = 7_200;
+
+    fn now_epoch_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time before UNIX EPOCH")
+            .as_secs()
+    }
+
+    fn write_credentials_file(
+        path: &std::path::Path,
+        access: &str,
+        refresh: &str,
+        expires_at: u64,
+    ) {
+        let mut file = fs::File::create(path).expect("create credentials file");
+        write!(
+            file,
+            r#"{{"accessToken":"{access}","refreshToken":"{refresh}","expiresAt":{expires_at}}}"#
+        )
+        .expect("write credentials file");
+    }
+
+    struct TestCredentialsFileGuard {
+        path: PathBuf,
+    }
+
+    impl TestCredentialsFileGuard {
+        fn new(path: PathBuf) -> Self {
+            credentials_file::set_test_credentials_file_path(Some(path.clone()));
+            Self { path }
+        }
+    }
+
+    impl Drop for TestCredentialsFileGuard {
+        fn drop(&mut self) {
+            credentials_file::set_test_credentials_file_path(None);
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn observes_external_credentials_file_update() {
+        let _guard = ENV_LOCK.lock().await;
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "claude-auth-proxy-refresh-external-{}-{}.json",
+            std::process::id(),
+            now_epoch_secs(),
+        ));
+
+        write_credentials_file(
+            &path,
+            "old_access",
+            "old_refresh",
+            now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
+        );
+        let _file_guard = TestCredentialsFileGuard::new(path.clone());
+
+        let auth = ClaudeCodeAuthProvider::new();
+        assert_eq!(
+            auth.get_access_token().await.expect("first token"),
+            "old_access"
+        );
+
+        write_credentials_file(
+            &path,
+            "new_access",
+            "new_refresh",
+            now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
+        );
+        std::thread::sleep(FILE_RELOAD_TTL + TEST_TIMING_BUFFER);
+
+        assert_eq!(
+            auth.get_access_token().await.expect("reloaded token"),
+            "new_access"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn skips_oauth_refresh_when_disk_credentials_are_fresh() {
+        let _guard = ENV_LOCK.lock().await;
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "claude-auth-proxy-refresh-fresh-disk-{}-{}.json",
+            std::process::id(),
+            now_epoch_secs(),
+        ));
+
+        write_credentials_file(
+            &path,
+            "fresh_access",
+            "fresh_refresh",
+            now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
+        );
+        let _file_guard = TestCredentialsFileGuard::new(path.clone());
+
+        let auth = ClaudeCodeAuthProvider::new();
+        {
+            let mut guard = auth.creds.write().expect("Poisoned Lock");
+            guard[0] = ClaudeCredential {
+                access_token: "stale_access".into(),
+                refresh_token: Some("stale_refresh".into()),
+                expires_at: now_epoch_secs() + 10,
+                subscription_type: None,
+            };
+        }
+        *auth.last_reload_at.lock().expect("Poisoned Lock") = None;
+
+        let stale = auth.get_active_credential().expect("stale credential");
+        let refreshed = refresh_access_token(&auth, stale, false)
+            .await
+            .expect("should use fresh disk credential");
+
+        assert_eq!(refreshed.access_token, "fresh_access");
+        assert_eq!(
+            auth.get_active_credential()
+                .expect("active credential")
+                .access_token,
+            "fresh_access"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn does_not_replace_fresher_in_memory_credential_with_stale_disk_credential() {
+        let _guard = ENV_LOCK.lock().await;
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "claude-auth-proxy-refresh-stale-disk-{}-{}.json",
+            std::process::id(),
+            now_epoch_secs(),
+        ));
+
+        write_credentials_file(&path, "disk_access", "disk_refresh", now_epoch_secs() + 100);
+        let _file_guard = TestCredentialsFileGuard::new(path.clone());
+
+        let auth = ClaudeCodeAuthProvider::new();
+        let fresher = ClaudeCredential {
+            access_token: "memory_access".into(),
+            refresh_token: Some("memory_refresh".into()),
+            expires_at: now_epoch_secs() + TEST_TOKEN_EXPIRY_OFFSET,
+            subscription_type: None,
+        };
+        {
+            let mut guard = auth.creds.write().expect("Poisoned Lock");
+            guard[0] = fresher.clone();
+        }
+        *auth.last_reload_at.lock().expect("Poisoned Lock") = None;
+
+        let refreshed = refresh_access_token(&auth, fresher, false)
+            .await
+            .expect("should keep fresher in-memory credential");
+
+        assert_eq!(refreshed.access_token, "memory_access");
+        assert_eq!(
+            auth.get_active_credential()
+                .expect("active credential")
+                .access_token,
+            "memory_access"
+        );
+    }
 }
